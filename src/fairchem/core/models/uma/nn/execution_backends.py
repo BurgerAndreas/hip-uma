@@ -212,6 +212,14 @@ class ExecutionBackend:
         return new_embedding
 
     @staticmethod
+    def edge_wigner_inv_permute(
+        x_message: torch.Tensor,
+        wigner_inv: torch.Tensor,
+    ) -> torch.Tensor:
+        """Rotate edge messages from M-major frame back to L-major frame."""
+        return torch.bmm(wigner_inv, x_message)
+
+    @staticmethod
     def edge_degree_scatter(
         x: torch.Tensor,
         radial_output: torch.Tensor,
@@ -395,6 +403,17 @@ class UMASFastGPUBackend(UMASFastPytorchBackend):
         )
         new_embedding.index_add_(0, edge_index[1] - node_offset, x_rotated)
         return new_embedding
+
+    @staticmethod
+    def edge_wigner_inv_permute(
+        x_message: torch.Tensor,
+        wigner_inv: torch.Tensor,
+    ) -> torch.Tensor:
+        from fairchem.core.models.uma.triton import (
+            UMASFastGPUPermuteWignerInvEdgeToNode,
+        )
+
+        return UMASFastGPUPermuteWignerInvEdgeToNode.apply(x_message, wigner_inv)
 
     @staticmethod
     def edge_degree_scatter(

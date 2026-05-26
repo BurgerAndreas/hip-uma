@@ -15,7 +15,7 @@ from fairchem.core.components.benchmark.training import (
 TRAINING_CONFIG = "configs/uma/benchmark/perf_check/training_inner.yaml"
 
 
-def test_training_benchmark_smoke():
+def test_training_benchmark_basic():
     result = run_training_benchmark(
         device="cpu",
         bf16=False,

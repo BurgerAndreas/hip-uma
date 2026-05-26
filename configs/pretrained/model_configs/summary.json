@@ -1,0 +1,170 @@
+[
+  {
+    "model_name": "uma-s-1p2",
+    "repo_id": "facebook/UMA",
+    "filename": "uma-s-1p2.pt",
+    "subfolder": "checkpoints",
+    "checkpoint_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--UMA/snapshots/7210de6fe86ad94854b21b881fefbcfdfeab373b/checkpoints/uma-s-1p2.pt",
+    "checkpoint_size_bytes": 2333393167,
+    "checkpoint_md5": "26ac47f57e7d68af9f031077cdc2cbe9",
+    "config_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/configs/pretrained/model_configs/uma-s-1p2.yaml",
+    "checkpoint_type": "fairchem.core.units.mlip_unit.api.inference.MLIPInferenceCheckpoint",
+    "state_dict_stats": {
+      "num_tensors": 155,
+      "total_parameters": 291482469,
+      "tensor_bytes": 1165930020,
+      "dtypes": {
+        "torch.float32": 291482433,
+        "torch.int64": 1,
+        "torch.float64": 35
+      }
+    },
+    "model_config_top_level_keys": [
+      "_target_",
+      "backbone",
+      "pass_through_head_outputs",
+      "heads",
+      "model_id",
+      "supports_single_atoms"
+    ],
+    "num_tasks": 16
+  },
+  {
+    "model_name": "uma-s-1p1",
+    "repo_id": "facebook/UMA",
+    "filename": "uma-s-1p1.pt",
+    "subfolder": "checkpoints",
+    "checkpoint_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--UMA/snapshots/7210de6fe86ad94854b21b881fefbcfdfeab373b/checkpoints/uma-s-1p1.pt",
+    "checkpoint_size_bytes": 1173759575,
+    "checkpoint_md5": "36a2f071350be0ee4c15e7ebdd16dde1",
+    "config_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/configs/pretrained/model_configs/uma-s-1p1.yaml",
+    "checkpoint_type": "fairchem.core.units.mlip_unit.api.inference.MLIPInferenceCheckpoint",
+    "state_dict_stats": {
+      "num_tensors": 153,
+      "total_parameters": 146566853,
+      "tensor_bytes": 586267556,
+      "dtypes": {
+        "torch.float32": 146566817,
+        "torch.int64": 1,
+        "torch.float64": 35
+      }
+    },
+    "model_config_top_level_keys": [
+      "_target_",
+      "backbone",
+      "heads",
+      "pass_through_head_outputs"
+    ],
+    "num_tasks": null
+  },
+  {
+    "model_name": "uma-m-1p1",
+    "repo_id": "facebook/UMA",
+    "filename": "uma-m-1p1.pt",
+    "subfolder": "checkpoints",
+    "checkpoint_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--UMA/snapshots/7210de6fe86ad94854b21b881fefbcfdfeab373b/checkpoints/uma-m-1p1.pt",
+    "checkpoint_size_bytes": 11174706771,
+    "checkpoint_md5": "8936aecf2eb101089af85934d3e881d6",
+    "config_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/configs/pretrained/model_configs/uma-m-1p1.yaml",
+    "checkpoint_type": "fairchem.core.units.mlip_unit.api.inference.MLIPInferenceCheckpoint",
+    "state_dict_stats": {
+      "num_tensors": 323,
+      "total_parameters": 1396669255,
+      "tensor_bytes": 5586677684,
+      "dtypes": {
+        "torch.float32": 1396669089,
+        "torch.int64": 1,
+        "torch.float64": 165
+      }
+    },
+    "model_config_top_level_keys": [
+      "_target_",
+      "backbone",
+      "heads",
+      "pass_through_head_outputs"
+    ],
+    "num_tasks": null
+  },
+  {
+    "model_name": "esen-sm-direct-all-omol",
+    "repo_id": "facebook/OMol25",
+    "filename": "esen_sm_direct_all.pt",
+    "subfolder": "checkpoints",
+    "checkpoint_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--OMol25/snapshots/039b7070e59d1537e56c93a3a455263d062ed9c8/checkpoints/esen_sm_direct_all.pt",
+    "checkpoint_size_bytes": 50960291,
+    "checkpoint_md5": "29d35d95c87e2ca4885a6bdd4e1f5d27",
+    "config_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/configs/pretrained/model_configs/esen-sm-direct-all-omol.yaml",
+    "checkpoint_type": "fairchem.core.units.mlip_unit.api.inference.MLIPInferenceCheckpoint",
+    "state_dict_stats": {
+      "num_tensors": 143,
+      "total_parameters": 6333094,
+      "tensor_bytes": 25332520,
+      "dtypes": {
+        "torch.float32": 6333058,
+        "torch.int64": 1,
+        "torch.float64": 35
+      }
+    },
+    "model_config_top_level_keys": [
+      "_target_",
+      "backbone",
+      "heads"
+    ],
+    "num_tasks": null
+  },
+  {
+    "model_name": "esen-sm-conserving-all-omol",
+    "repo_id": "facebook/OMol25",
+    "filename": "esen_sm_conserving_all.pt",
+    "subfolder": "checkpoints",
+    "checkpoint_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--OMol25/snapshots/039b7070e59d1537e56c93a3a455263d062ed9c8/checkpoints/esen_sm_conserving_all.pt",
+    "checkpoint_size_bytes": 50958067,
+    "checkpoint_md5": "e6697a7a114c80d2809dc775ba587c33",
+    "config_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/configs/pretrained/model_configs/esen-sm-conserving-all-omol.yaml",
+    "checkpoint_type": "fairchem.core.units.mlip_unit.api.inference.MLIPInferenceCheckpoint",
+    "state_dict_stats": {
+      "num_tensors": 141,
+      "total_parameters": 6332837,
+      "tensor_bytes": 25331492,
+      "dtypes": {
+        "torch.float32": 6332801,
+        "torch.int64": 1,
+        "torch.float64": 35
+      }
+    },
+    "model_config_top_level_keys": [
+      "_target_",
+      "backbone",
+      "pass_through_head_outputs",
+      "heads"
+    ],
+    "num_tasks": null
+  },
+  {
+    "model_name": "esen-md-direct-all-omol",
+    "repo_id": "facebook/OMol25",
+    "filename": "esen_md_direct_all.pt",
+    "subfolder": "checkpoints",
+    "checkpoint_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--OMol25/snapshots/039b7070e59d1537e56c93a3a455263d062ed9c8/checkpoints/esen_md_direct_all.pt",
+    "checkpoint_size_bytes": 405789591,
+    "checkpoint_md5": "d980d888cbdd0a7abfae2c7da62ea2f7",
+    "config_path": "/lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/configs/pretrained/model_configs/esen-md-direct-all-omol.yaml",
+    "checkpoint_type": "fairchem.core.units.mlip_unit.api.inference.MLIPInferenceCheckpoint",
+    "state_dict_stats": {
+      "num_tensors": 313,
+      "total_parameters": 50671400,
+      "tensor_bytes": 202686264,
+      "dtypes": {
+        "torch.float32": 50671234,
+        "torch.int64": 1,
+        "torch.float64": 165
+      }
+    },
+    "model_config_top_level_keys": [
+      "_target_",
+      "backbone",
+      "heads"
+    ],
+    "num_tasks": null
+  }
+]

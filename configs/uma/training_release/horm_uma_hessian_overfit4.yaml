@@ -1,0 +1,68 @@
+defaults:
+  - horm_uma_hessian
+  - _self_
+
+job:
+  device_type: CUDA
+  run_dir: outputs/horm_uma_hessian_overfit4
+  run_name: horm_uma_hessian_overfit4
+
+steps: 300
+batch_size: 128
+hessian_loss_mode: mae
+
+omol_train:
+  splits:
+    train:
+      src: data/horm_atomic/ts1x_hess_train.atomic.lmdb
+      metadata_path: data/horm_atomic/ts1x_hess_train.atomic.metadata.npz
+      first_n: 4
+
+omol_val:
+  splits:
+    val:
+      src: data/horm_atomic/ts1x_hess_train.atomic.lmdb
+      metadata_path: data/horm_atomic/ts1x_hess_train.atomic.metadata.npz
+      first_n: 4
+
+tasks:
+- _target_: fairchem.core.units.mlip_unit.mlip_unit.Task
+  name: hessian
+  level: system
+  property: hessian
+  loss_fn:
+    _target_: fairchem.core.modules.loss.HessianLoss
+    mode: ${hessian_loss_mode}
+    reduction: structure_mean
+    coefficient: ${hessian_coef}
+  out_spec:
+    dim: [1]
+    dtype: float32
+  normalizer:
+    _target_: fairchem.core.modules.normalization.normalizer.Normalizer
+    mean: 0.0
+    rmsd: ${normalizer_rmsd}
+  datasets:
+    - omol
+  metrics:
+    - hessian_mae
+    - hessian_mse
+    - hessian_rmse
+    - hessian_eckart_eigenvalue_mae
+    - hessian_eckart_eigvec1_cos
+    - hessian_eckart_eigvec2_cos
+
+runner:
+  train_eval_unit:
+    optimizer_fn:
+      lr: 0.002
+      weight_decay: 0.0
+    cosine_lr_scheduler_fn:
+      steps: 1000
+    print_every: 10
+    ema_decay: null
+  evaluate_every_n_steps: 50
+  callbacks:
+    - _target_: fairchem.core.components.train.train_runner.TrainCheckpointCallback
+      checkpoint_every_n_steps: 300
+      max_saved_checkpoints: 2

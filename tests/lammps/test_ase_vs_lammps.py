@@ -89,7 +89,7 @@ def run_ase_npt():
     an NPT run by coupling to a thermostat and using the `Parrinello-Rahman`
     style barostat if available in user's setup. For portability in tests we
     instead run VelocityVerlet with a simple rescaling of the cell using the
-    `ase.constraints` is out of scope — this is a lightweight smoke test to
+    `ase.constraints` is out of scope — this is a lightweight test to
     exercise the predictor through an NPT LAMMPS run for comparison.
     """
     atoms = bulk("C", "fcc", a=3.567, cubic=True)

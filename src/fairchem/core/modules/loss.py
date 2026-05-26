@@ -196,6 +196,89 @@ class MSELoss(nn.Module):
         return self.loss(pred, target)
 
 
+@registry.register_loss("hessian")
+class HessianLoss(nn.Module):
+    """Loss for concatenated variable-size flattened Hessian targets."""
+
+    def __init__(
+        self,
+        mode: Literal["mae", "mse", "rmse"] = "mse",
+        reduction: Literal["structure_mean", "entry_mean", "sum"] = "structure_mean",
+        coefficient: float = 1.0,
+        eps: float = 1.0e-12,
+    ) -> None:
+        super().__init__()
+        if mode not in ("mae", "mse", "rmse"):
+            raise ValueError("HessianLoss mode must be one of: mae, mse, rmse")
+        if reduction not in ("structure_mean", "entry_mean", "sum"):
+            raise ValueError(
+                "HessianLoss reduction must be one of: structure_mean, entry_mean, sum"
+            )
+        self.mode = mode
+        self.reduction = reduction
+        self.coefficient = coefficient
+        self.eps = eps
+
+    def _element_loss(self, diff: torch.Tensor) -> torch.Tensor:
+        if self.mode == "mae":
+            return diff.abs()
+        return diff.square()
+
+    def _reduce_segment(self, diff: torch.Tensor) -> torch.Tensor:
+        if self.mode == "mae":
+            return diff.abs().mean()
+        mse = diff.square().mean()
+        if self.mode == "mse":
+            return mse
+        return torch.sqrt(mse + self.eps)
+
+    def _ddp_mean(self, num_samples: int | torch.Tensor, loss: torch.Tensor):
+        global_samples = max(distutils.all_reduce(num_samples, device=loss.device), 1)
+        corrected_loss = loss * distutils.get_world_size() / global_samples
+        if gp_utils.initialized():
+            return gp_utils.scale_backward_grad(corrected_loss)
+        return corrected_loss
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        target: torch.Tensor,
+        mult_mask: torch.Tensor,
+        natoms: torch.Tensor,
+        ptr_1d_hessian: torch.Tensor,
+    ) -> torch.Tensor:
+        input = input.reshape(-1)
+        target = torch.nan_to_num(target.reshape(-1), posinf=0.0, neginf=0.0)
+        mult_mask = mult_mask.reshape(-1).to(dtype=torch.bool, device=input.device)
+        ptr_1d_hessian = ptr_1d_hessian.to(device=input.device, dtype=torch.long)
+        assert input.shape == target.shape == mult_mask.shape
+        assert ptr_1d_hessian.numel() == natoms.numel() + 1
+
+        diff = input - target
+        if self.reduction == "sum":
+            loss = (self._element_loss(diff) * mult_mask).sum()
+        elif self.reduction == "entry_mean":
+            loss = (self._element_loss(diff) * mult_mask).sum()
+            loss = self._ddp_mean(mult_mask.sum(), loss)
+        else:
+            segment_losses = []
+            for start, stop in zip(ptr_1d_hessian[:-1], ptr_1d_hessian[1:]):
+                segment_mask = mult_mask[start:stop]
+                if segment_mask.any():
+                    segment_losses.append(self._reduce_segment(diff[start:stop][segment_mask]))
+            if segment_losses:
+                loss = torch.stack(segment_losses).sum()
+                loss = self._ddp_mean(len(segment_losses), loss)
+            else:
+                loss = input.sum() * 0.0
+
+        found_nans_or_infs = not torch.all(loss.isfinite())
+        if found_nans_or_infs is True:
+            logging.warning("Found nans while computing Hessian loss")
+            loss = torch.nan_to_num(loss, nan=0.0)
+        return self.coefficient * loss
+
+
 @registry.register_loss("per_atom_mae")
 class PerAtomMAELoss(nn.Module):
     """

@@ -1,0 +1,194 @@
+defaults:
+  - backbone: K2L2_test
+  - _self_
+
+job:
+  device_type: CPU
+  scheduler:
+    mode: LOCAL
+    ranks_per_node: 1
+    num_nodes: 1
+  debug: True
+  run_dir: outputs/horm_uma_test_from_scratch_cpu
+  run_name: horm_uma_test_cpu
+  logger: null
+
+moe_layer_type: pytorch
+num_moe_experts: 0
+act_type: s2
+ff_type: grid
+max_neighbors: 30
+cutoff_radius: 6
+epochs: null
+steps: 1
+batch_size: 1
+bf16: False
+normalizer_rmsd: 1.0
+direct_forces_coef: 2
+omol_energy_coef: 20
+regress_stress: False
+direct_forces: True
+dataset_list: ["omol"]
+exclude_keys: ["hessian"]
+
+omol_train:
+  splits:
+    train:
+      src: data/horm_atomic/ts1x-val.atomic.lmdb
+      metadata_path: data/horm_atomic/ts1x-val.atomic.metadata.npz
+      first_n: 128
+  format: atomic_lmdb
+  key_mapping:
+    energy: omol_energy
+  transforms:
+    common_transform:
+      dataset_name: omol
+    molecule_cell_transform:
+      cell_size: 120.0
+
+omol_val:
+  splits:
+    val:
+      src: data/horm_atomic/ts1x-val.atomic.lmdb
+      metadata_path: data/horm_atomic/ts1x-val.atomic.metadata.npz
+      first_n: 32
+  format: atomic_lmdb
+  key_mapping:
+    energy: omol_energy
+  transforms:
+    common_transform:
+      dataset_name: omol
+    molecule_cell_transform:
+      cell_size: 120.0
+
+train_dataset:
+  _target_: fairchem.core.datasets.mt_concat_dataset.create_concat_dataset
+  dataset_configs:
+    omol: ${omol_train}
+  combined_dataset_config: { sampling: {type: temperature, temperature: 1.0} }
+
+val_dataset:
+  _target_: fairchem.core.datasets.mt_concat_dataset.create_concat_dataset
+  dataset_configs:
+    omol: ${omol_val}
+  combined_dataset_config: { sampling: {type: temperature, temperature: 1.0} }
+
+train_dataloader:
+  _target_: fairchem.core.components.common.dataloader_builder.get_dataloader
+  dataset: ${train_dataset}
+  batch_sampler_fn:
+    _target_: fairchem.core.common.data_parallel.BalancedBatchSampler
+    _partial_: True
+    batch_size: ${batch_size}
+    shuffle: True
+    seed: 0
+  num_workers: 0
+  collate_fn:
+    _target_: fairchem.core.units.mlip_unit.mlip_unit.mt_collater_adapter
+    tasks: ${tasks}
+    exclude_keys: ${exclude_keys}
+
+eval_dataloader:
+  _target_: fairchem.core.components.common.dataloader_builder.get_dataloader
+  dataset: ${val_dataset}
+  batch_sampler_fn:
+    _target_: fairchem.core.common.data_parallel.BalancedBatchSampler
+    _partial_: True
+    batch_size: ${batch_size}
+    shuffle: False
+    seed: 0
+  num_workers: 0
+  collate_fn:
+    _target_: fairchem.core.units.mlip_unit.mlip_unit.mt_collater_adapter
+    tasks: ${tasks}
+    exclude_keys: ${exclude_keys}
+
+heads:
+  omol_energy:
+    module: fairchem.core.models.uma.escn_md.MLP_Energy_Head
+  forces:
+    module: fairchem.core.models.uma.escn_md.Linear_Force_Head
+
+tasks:
+- _target_: fairchem.core.units.mlip_unit.mlip_unit.Task
+  name: omol_energy
+  level: system
+  property: energy
+  loss_fn:
+    _target_: fairchem.core.modules.loss.DDPMTLoss
+    loss_fn:
+      _target_: fairchem.core.modules.loss.PerAtomMAELoss
+    coefficient: ${omol_energy_coef}
+  out_spec:
+    dim: [1]
+    dtype: float32
+  normalizer:
+    _target_: fairchem.core.modules.normalization.normalizer.Normalizer
+    mean: 0.0
+    rmsd: ${normalizer_rmsd}
+  datasets:
+    - omol
+  metrics:
+    - mae
+    - per_atom_mae
+- _target_: fairchem.core.units.mlip_unit.mlip_unit.Task
+  name: forces
+  level: atom
+  property: forces
+  train_on_free_atoms: True
+  eval_on_free_atoms: True
+  loss_fn:
+    _target_: fairchem.core.modules.loss.DDPMTLoss
+    loss_fn:
+      _target_: fairchem.core.modules.loss.L2NormLoss
+    reduction: mean
+    coefficient: ${direct_forces_coef}
+  out_spec:
+    dim: [3]
+    dtype: float32
+  normalizer:
+    _target_: fairchem.core.modules.normalization.normalizer.Normalizer
+    mean: 0.0
+    rmsd: ${normalizer_rmsd}
+  datasets:
+    - omol
+  metrics:
+    - mae
+    - cosine_similarity
+    - magnitude_error
+
+runner:
+  _target_: fairchem.core.components.train.train_runner.TrainEvalRunner
+  train_dataloader: ${train_dataloader}
+  eval_dataloader: ${eval_dataloader}
+  train_eval_unit:
+    _target_: fairchem.core.units.mlip_unit.mlip_unit.MLIPTrainEvalUnit
+    job_config: ${job}
+    tasks: ${tasks}
+    model:
+      _target_: fairchem.core.models.base.HydraModel
+      backbone: ${backbone}
+      heads: ${heads}
+    optimizer_fn:
+      _target_: torch.optim.AdamW
+      _partial_: true
+      lr: 8e-4
+      weight_decay: 1e-3
+    cosine_lr_scheduler_fn:
+      _target_: fairchem.core.units.mlip_unit.mlip_unit._get_consine_lr_scheduler
+      _partial_: true
+      warmup_factor: 0.2
+      warmup_epochs: 0.01
+      lr_min_factor: 0.01
+      epochs: ${epochs}
+      steps: ${steps}
+    print_every: 1
+    clip_grad_norm: 100
+    bf16: ${bf16}
+  max_epochs: ${epochs}
+  max_steps: ${steps}
+  evaluate_every_n_steps: 1
+  callbacks:
+    - _target_: fairchem.core.components.train.train_runner.TrainCheckpointCallback
+      checkpoint_every_n_steps: 1
+      max_saved_checkpoints: 2

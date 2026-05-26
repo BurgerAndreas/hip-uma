@@ -197,6 +197,7 @@ def get_output_mask(batch: AtomicData, task: Task) -> dict[str, torch.Tensor]:
     """
 
     output_masks = {task.name: torch.isfinite(batch[task.name])}
+    is_hessian = task.property == "hessian"
     if "forces" in task.name:
         output_masks[task.name] = output_masks[task.name].all(dim=1)
 
@@ -204,7 +205,12 @@ def get_output_mask(batch: AtomicData, task: Task) -> dict[str, torch.Tensor]:
         dset_mask = torch.from_numpy(np.array(batch.dataset_name) == dset).to(
             batch.pos.device
         )
-        if task.level == "atom":
+        if is_hessian:
+            dset_expanded = torch.repeat_interleave(dset_mask, batch.hessian_nentries)
+            output_masks[f"{dset}.{task.name}"] = (
+                dset_expanded & output_masks[task.name]
+            )
+        elif task.level == "atom":
             dset_mask = torch.repeat_interleave(dset_mask, batch.natoms)
             output_masks[f"{dset}.{task.name}"] = dset_mask & output_masks[task.name]
         elif "stress" in task.name:
@@ -276,6 +282,17 @@ def compute_loss(
         # this is related to how Hydra outputs stuff in nested dicts:
         # ie: oc20_energy.energy
         pred_for_task = predictions[task.name][task.property]
+        if task.property == "hessian":
+            pred_for_task = pred_for_task.reshape(-1)
+            target = target.reshape(-1)
+            loss_dict[task.name] = task.loss_fn(
+                pred_for_task,
+                target,
+                mult_mask=output_mask.reshape(-1),
+                natoms=batch.natoms,
+                ptr_1d_hessian=batch.ptr_1d_hessian,
+            )
+            continue
         if task.level == "atom":
             pred_for_task = pred_for_task.view(num_atoms_in_batch, -1)
         else:
@@ -320,6 +337,25 @@ def compute_metrics(
     # output masks include task level mask, and task.dataset level masks.
     mask_key = task.name if dataset_name is None else f"{dataset_name}.{task.name}"
     output_mask = get_output_mask(batch, task)[mask_key]
+
+    if task.property == "hessian":
+        target = batch[task.name].clone()
+        pred = predictions[task.name][task.property].clone()
+        pred = task.normalizer.denorm(pred).reshape(-1)
+        target_dict = {
+            task.property: target.reshape(-1),
+            "ptr_1d_hessian": batch.ptr_1d_hessian,
+            "natoms": batch.natoms,
+            "pos": batch.pos,
+            "atomic_numbers": batch.atomic_numbers,
+            "entry_mask": output_mask.reshape(-1),
+        }
+        pred_dict = {task.property: pred}
+        metrics = {}
+        for metric_name in task.metrics:
+            metric_fn = get_metrics_fn(metric_name)
+            metrics[metric_name] = metric_fn(pred_dict, target_dict, key=task.property)
+        return metrics
 
     natoms = torch.repeat_interleave(batch.natoms, batch.natoms)
     if task.level == "atom":

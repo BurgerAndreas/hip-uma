@@ -171,6 +171,83 @@ class Edgewise(torch.nn.Module):
                 new_embeddings = [torch.stack(new_embeddings).sum(axis=0)]
         return torch.stack(new_embeddings).sum(axis=0)
 
+    def forward_messages(
+        self,
+        x,
+        x_edge,
+        edge_index,
+        wigner,
+        wigner_inv_envelope,
+        total_atoms_across_gp_ranks,
+        node_offset: int = 0,
+    ):
+        if gp_utils.initialized():
+            x_full = gp_utils.gather_from_model_parallel_region_sum_grad(
+                x, total_atoms_across_gp_ranks
+            )
+        else:
+            x_full = x
+
+        if self.activation_checkpoint_chunk_size is None:
+            return self.forward_chunk_messages(
+                x_full,
+                x_edge,
+                edge_index,
+                wigner,
+                wigner_inv_envelope,
+            )
+
+        edge_index_partitions = edge_index.split(
+            self.activation_checkpoint_chunk_size, dim=1
+        )
+        wigner_partitions = wigner.split(self.activation_checkpoint_chunk_size, dim=0)
+        wigner_inv_partitions = wigner_inv_envelope.split(
+            self.activation_checkpoint_chunk_size, dim=0
+        )
+        x_edge_partitions = x_edge.split(self.activation_checkpoint_chunk_size, dim=0)
+        edge_messages = []
+        ac_mole_start_idx = 0
+        for idx in range(len(edge_index_partitions)):
+            edge_messages.append(
+                torch.utils.checkpoint.checkpoint(
+                    self.forward_chunk_messages,
+                    x_full,
+                    x_edge_partitions[idx],
+                    edge_index_partitions[idx],
+                    wigner_partitions[idx],
+                    wigner_inv_partitions[idx],
+                    ac_mole_start_idx,
+                    use_reentrant=False,
+                )
+            )
+            ac_mole_start_idx += edge_index_partitions[idx].shape[1]
+        return torch.cat(edge_messages, dim=0)
+
+    def forward_chunk_messages(
+        self,
+        x_full,
+        x_edge,
+        edge_index,
+        wigner,
+        wigner_inv_envelope,
+        ac_mole_start_idx: int = 0,
+    ):
+        set_mole_ac_start_index(self, ac_mole_start_idx)
+
+        with record_function("SO2ConvMessages"):
+            x_message = self.backend.node_to_edge_wigner_permute(
+                x_full, edge_index, wigner
+            )
+            x_message, x_0_gating = self.so2_conv_1(x_message, x_edge)
+            x_message = self.act(x_0_gating, x_message)
+            x_message = self.so2_conv_2(x_message)
+            x_message = self.backend.edge_wigner_inv_permute(
+                x_message, wigner_inv_envelope
+            )
+
+        set_mole_ac_start_index(self, 0)
+        return x_message
+
     def forward_chunk(
         self,
         x_full,

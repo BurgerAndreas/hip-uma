@@ -77,6 +77,66 @@ def test_to_ase_batch(batch_edgeless):
     assert (atomicdata_list[1].edge_index == edge_index[:, :2]).all()
 
 
+def _atomic_data_with_hessian(num_atoms: int, dtype: torch.dtype = torch.float32):
+    hessian = torch.arange((3 * num_atoms) ** 2, dtype=dtype)
+    return AtomicData.from_dict(
+        {
+            "pos": torch.arange(num_atoms * 3, dtype=dtype).view(num_atoms, 3),
+            "atomic_numbers": torch.ones(num_atoms, dtype=torch.long),
+            "cell": torch.eye(3, dtype=dtype).view(1, 3, 3),
+            "pbc": torch.zeros(1, 3, dtype=torch.bool),
+            "natoms": torch.tensor([num_atoms], dtype=torch.long),
+            "edge_index": torch.empty(2, 0, dtype=torch.long),
+            "cell_offsets": torch.empty(0, 3, dtype=dtype),
+            "nedges": torch.tensor([0], dtype=torch.long),
+            "charge": torch.zeros(1, dtype=torch.long),
+            "spin": torch.zeros(1, dtype=torch.long),
+            "fixed": torch.zeros(num_atoms, dtype=torch.long),
+            "tags": torch.ones(num_atoms, dtype=torch.long),
+            "hessian": hessian,
+        }
+    )
+
+
+def test_hessian_target_validation_accepts_flattened_target():
+    data = _atomic_data_with_hessian(3)
+
+    assert data.hessian.shape == (81,)
+    assert data.hessian.dtype == data.pos.dtype
+
+
+def test_hessian_target_validation_rejects_wrong_length():
+    data_dict = _atomic_data_with_hessian(3).to_dict()
+    data_dict["hessian"] = torch.zeros(80, dtype=torch.float32)
+
+    with pytest.raises(AssertionError):
+        AtomicData.from_dict(data_dict)
+
+
+def test_hessian_target_validation_rejects_wrong_dtype():
+    data_dict = _atomic_data_with_hessian(3).to_dict()
+    data_dict["hessian"] = data_dict["hessian"].to(torch.float64)
+
+    with pytest.raises(AssertionError):
+        AtomicData.from_dict(data_dict)
+
+
+def test_atomicdata_list_to_batch_concatenates_hessian_and_adds_metadata():
+    data0 = _atomic_data_with_hessian(2)
+    data1 = _atomic_data_with_hessian(3)
+
+    batch = atomicdata_list_to_batch([data0, data1])
+
+    assert torch.equal(batch.hessian[:36], data0.hessian)
+    assert torch.equal(batch.hessian[36:], data1.hessian)
+    assert torch.equal(batch.hessian_nentries, torch.tensor([36, 81]))
+    assert torch.equal(batch.ptr_1d_hessian, torch.tensor([0, 36, 117]))
+
+    unbatched = batch.batch_to_atomicdata_list()
+    assert torch.equal(unbatched[0].hessian, data0.hessian)
+    assert torch.equal(unbatched[1].hessian, data1.hessian)
+
+
 def test_warn_if_upcasting(caplog):
     """
     Test that warn_if_upcasting logs when upcasting and is silent otherwise.

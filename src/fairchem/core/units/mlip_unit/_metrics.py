@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Callable
 import numpy as np
 import torch
 
+from fairchem.core.units.mlip_unit.hessian_metrics import hessian_eckart_metric
+
 if TYPE_CHECKING:
     from collections.abc import Hashable
 
@@ -89,6 +91,104 @@ def rmse(
     key: Hashable = None,
 ) -> torch.Tensor:
     return torch.sqrt(((target[key] - prediction[key]) ** 2).sum(dim=-1))
+
+
+def _masked_hessian_segments(
+    prediction: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    key: Hashable,
+):
+    pred = prediction[key].reshape(-1)
+    target_tensor = target[key].reshape(-1)
+    ptr = target["ptr_1d_hessian"].to(device=pred.device, dtype=torch.long)
+    entry_mask = target.get(
+        "entry_mask", torch.ones_like(target_tensor, dtype=torch.bool)
+    ).to(device=pred.device, dtype=torch.bool)
+    for sample_idx, (start, stop) in enumerate(zip(ptr[:-1], ptr[1:])):
+        segment_mask = entry_mask[start:stop]
+        if segment_mask.any():
+            yield sample_idx, pred[start:stop], target_tensor[start:stop], segment_mask
+
+
+def _hessian_entry_metric(
+    prediction: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    key: Hashable,
+    mode: str,
+) -> Metrics:
+    values = []
+    for _, pred_seg, target_seg, mask in _masked_hessian_segments(
+        prediction, target, key
+    ):
+        diff = pred_seg[mask] - target_seg[mask]
+        if mode == "mae":
+            values.append(diff.abs().mean())
+        elif mode == "mse":
+            values.append(diff.square().mean())
+        elif mode == "rmse":
+            values.append(torch.sqrt(diff.square().mean()))
+        else:
+            raise ValueError(f"Unknown Hessian metric mode {mode}")
+    if not values:
+        return Metrics()
+    values_t = torch.stack(values)
+    return Metrics(
+        metric=values_t.mean().item(),
+        total=values_t.sum().item(),
+        numel=values_t.numel(),
+    )
+
+
+def hessian_mae(
+    prediction: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    key: Hashable = NONE_SLICE,
+) -> Metrics:
+    return _hessian_entry_metric(prediction, target, key, mode="mae")
+
+
+def hessian_mse(
+    prediction: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    key: Hashable = NONE_SLICE,
+) -> Metrics:
+    return _hessian_entry_metric(prediction, target, key, mode="mse")
+
+
+def hessian_rmse(
+    prediction: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    key: Hashable = NONE_SLICE,
+) -> Metrics:
+    return _hessian_entry_metric(prediction, target, key, mode="rmse")
+
+
+def hessian_eckart_eigenvalue_mae(
+    prediction: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    key: Hashable = NONE_SLICE,
+) -> Metrics:
+    return hessian_eckart_metric(prediction, target, key, mode="eigval_mae")
+
+
+def hessian_eckart_eigvec1_cos(
+    prediction: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    key: Hashable = NONE_SLICE,
+) -> Metrics:
+    return hessian_eckart_metric(
+        prediction, target, key, mode="eigvec_cos", eigvec_idx=0
+    )
+
+
+def hessian_eckart_eigvec2_cos(
+    prediction: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    key: Hashable = NONE_SLICE,
+) -> Metrics:
+    return hessian_eckart_metric(
+        prediction, target, key, mode="eigvec_cos", eigvec_idx=1
+    )
 
 
 @metrics_dict

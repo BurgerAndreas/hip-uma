@@ -52,6 +52,20 @@ def common_transform(data_object: AtomicData, config) -> AtomicData:
     return data_object
 
 
+def molecule_cell_transform(data_object: AtomicData, config) -> AtomicData:
+    cell_size = float(config.get("cell_size", 120.0))
+    data_object.cell = torch.eye(
+        3, dtype=data_object.pos.dtype, device=data_object.pos.device
+    ).view(1, 3, 3)
+    data_object.cell = data_object.cell * cell_size
+    data_object.pbc = torch.zeros((1, 3), dtype=torch.bool, device=data_object.pos.device)
+    if not hasattr(data_object, "fixed"):
+        data_object.fixed = torch.zeros(
+            data_object.natoms, dtype=torch.float, device=data_object.pos.device
+        )
+    return data_object
+
+
 def ensure_tensor(data_object, keys):
     # ensure dataset_energy is a tensor
     if isinstance(keys, str):

@@ -19,6 +19,7 @@ from fairchem.core.common.test_utils import (
 )
 from fairchem.core.modules.loss import (
     DDPLoss,
+    HessianLoss,
     L2NormLoss,
     MAELoss,
     MSELoss,
@@ -145,6 +146,39 @@ def test_mse_reduction(forces, natoms):
     loss = DDPLoss(loss_name="mse", reduction="sum")
     ref_loss = nn.MSELoss(reduction="sum")
     assert torch.allclose(loss(pred, target, natoms), ref_loss(pred, target))
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("mae", torch.tensor(1.5)),
+        ("mse", torch.tensor(2.5)),
+        ("rmse", torch.tensor(1.5)),
+    ],
+)
+def test_hessian_loss_structure_mean(mode, expected):
+    pred = torch.cat((torch.ones(36), torch.full((81,), 2.0)))
+    target = torch.zeros_like(pred)
+    mask = torch.ones_like(pred, dtype=torch.bool)
+    natoms = torch.tensor([2, 3])
+    ptr = torch.tensor([0, 36, 117])
+
+    loss = HessianLoss(mode=mode, reduction="structure_mean")
+
+    assert torch.allclose(loss(pred, target, mask, natoms, ptr), expected)
+
+
+def test_hessian_loss_entry_mean():
+    pred = torch.cat((torch.ones(36), torch.full((81,), 2.0)))
+    target = torch.zeros_like(pred)
+    mask = torch.ones_like(pred, dtype=torch.bool)
+    natoms = torch.tensor([2, 3])
+    ptr = torch.tensor([0, 36, 117])
+
+    loss = HessianLoss(mode="mae", reduction="entry_mean")
+
+    expected = (36 + 81 * 2) / 117
+    assert torch.allclose(loss(pred, target, mask, natoms, ptr), torch.tensor(expected))
 
 
 def split_batch_for_ddp(

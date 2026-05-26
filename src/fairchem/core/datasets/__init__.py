@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from .ase_datasets import AseDBDataset, AseReadDataset, AseReadMultiStructureDataset
+from .atomic_lmdb_dataset import AtomicLMDBDataset
 from .base_dataset import create_dataset
 from .collaters.simple_collater import (
     data_list_collater,
@@ -14,6 +15,7 @@ __all__ = [
     "AseDBDataset",
     "AseReadDataset",
     "AseReadMultiStructureDataset",
+    "AtomicLMDBDataset",
     "create_dataset",
     "data_list_collater",
 ]

@@ -64,7 +64,7 @@ _REQUIRED_KEYS = [
     "tags",
 ]
 
-_OPTIONAL_KEYS = ["energy", "forces", "stress", "dataset"]
+_OPTIONAL_KEYS = ["energy", "forces", "stress", "hessian", "dataset"]
 
 # TODO: potential future keys
 # ["virials", "atom_attr", "edge_attr"]
@@ -86,6 +86,24 @@ def warn_if_upcasting(source_dtype: torch.dtype, target_dtype: torch.dtype) -> b
         )
         return True
     return False
+
+
+def hessian_nentries_from_natoms(natoms: torch.Tensor) -> torch.Tensor:
+    """Return flattened Hessian lengths for each system."""
+    return (natoms.to(dtype=torch.long) * 3) ** 2
+
+
+def add_hessian_batch_metadata(data: AtomicData) -> AtomicData:
+    """Attach flattened Hessian segment sizes and pointers to an AtomicData batch."""
+    device = data.hessian.device if hasattr(data, "hessian") else data.natoms.device
+    hessian_nentries = hessian_nentries_from_natoms(data.natoms.to(device=device))
+    data.hessian_nentries = hessian_nentries
+    data.ptr_1d_hessian = torch.empty(
+        hessian_nentries.numel() + 1, device=device, dtype=torch.long
+    )
+    data.ptr_1d_hessian[0] = 0
+    data.ptr_1d_hessian[1:] = torch.cumsum(hessian_nentries, dim=0)
+    return data
 
 
 def size_repr(key: str, item: torch.Tensor, indent=0) -> str:
@@ -174,6 +192,7 @@ class AtomicData:
         energy: torch.Tensor | None = None,  # (num_graph,)
         forces: torch.Tensor | None = None,  # (num_node, 3)
         stress: torch.Tensor | None = None,  # (num_graph, 3, 3)
+        hessian: torch.Tensor | None = None,  # (sum_b (3 * natoms_b) ** 2,)
         batch: torch.Tensor | None = None,  # (num_node,)
         sid: list[str] | None = None,
         dataset: list[str] | str | None = None,
@@ -214,6 +233,8 @@ class AtomicData:
             self.forces = forces
         if stress is not None:
             self.stress = stress
+        if hessian is not None:
+            self.hessian = hessian
 
         # batch related
         if batch is not None:
@@ -316,6 +337,13 @@ class AtomicData:
             )
             assert self.stress.shape[0] == self.num_graphs
             assert self.stress.dtype == self.pos.dtype
+        if hasattr(self, "hessian"):
+            assert self.hessian.dim() == 1
+            assert (
+                self.hessian.numel()
+                == hessian_nentries_from_natoms(self.natoms).sum().item()
+            )
+            assert self.hessian.dtype == self.pos.dtype
 
         if self.sid is not None:
             assert isinstance(self.sid, list)
@@ -567,6 +595,7 @@ class AtomicData:
             energy=dictionary.get("energy", None),
             forces=dictionary.get("forces", None),
             stress=dictionary.get("stress", None),
+            hessian=dictionary.get("hessian", None),
             batch=dictionary.get("batch", None),
             sid=dictionary.get("sid", None),
             dataset=dictionary.get("dataset", None),
@@ -961,6 +990,8 @@ def atomicdata_list_to_batch(
     batched_data_dict["sid"] = sid_list
     atomic_data_batch = AtomicData.from_dict(batched_data_dict)
     atomic_data_batch.assign_batch_stats(slices, cumsum, cat_dims, natoms_list)
+    if "hessian" in keys:
+        add_hessian_batch_metadata(atomic_data_batch)
 
     return atomic_data_batch.contiguous()
 

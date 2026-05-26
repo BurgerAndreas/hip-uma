@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -35,6 +36,12 @@ from fairchem.core.models.uma.common.rotation import (
     init_edge_rot_euler_angles,
 )
 from fairchem.core.models.uma.common.so3 import CoefficientMapping, SO3_Grid
+from fairchem.core.models.uma.hessian_pred_utils import (
+    add_hessian_graph_batch,
+    blocks3x3_to_hessian,
+    get_cartesian_wigner_3j_basis,
+    irreps_to_cartesian_matrix,
+)
 from fairchem.core.models.uma.nn.embedding import (
     ChgSpinEmbedding,
     DatasetEmbedding,
@@ -1192,6 +1199,139 @@ class Linear_Force_Head(nn.Module, HeadInterface):
             )
 
         return {"forces": forces}
+
+
+class Hessian_Head(nn.Module, HeadInterface):
+    def __init__(
+        self,
+        backbone: eSCNMDBackbone,
+        cutoff_hessian: float = 100.0,
+        fully_connected_hessian: bool = True,
+        use_pbc_hessian: bool = False,
+        radius_pbc_version_hessian: int | None = None,
+    ) -> None:
+        super().__init__()
+        if backbone.lmax < 2:
+            raise ValueError("Hessian_Head requires backbone.lmax >= 2")
+        if len(backbone.blocks) == 0:
+            raise ValueError("Hessian_Head requires at least one eSCNMD block")
+
+        object.__setattr__(self, "_backbone_ref", weakref.ref(backbone))
+        self.cutoff_hessian = cutoff_hessian
+        self.fully_connected_hessian = fully_connected_hessian
+        self.use_pbc_hessian = use_pbc_hessian
+        self.radius_pbc_version_hessian = (
+            radius_pbc_version_hessian
+            if radius_pbc_version_hessian is not None
+            else backbone.radius_pbc_version
+        )
+        self.edge_wise_block_idx = len(backbone.blocks) - 1
+        self.node_projection = SO3_Linear(backbone.sphere_channels, 1, lmax=2)
+        self.edge_projection = SO3_Linear(backbone.sphere_channels, 1, lmax=2)
+        self.distance_expansion_hessian = GaussianSmearing(
+            0.0,
+            self.cutoff_hessian,
+            backbone.num_distance_basis,
+            2.0,
+        )
+        self.register_buffer(
+            "cartesian_wigner_3j_basis",
+            get_cartesian_wigner_3j_basis(),
+            persistent=False,
+        )
+
+    @property
+    def backbone(self) -> eSCNMDBackbone:
+        backbone = self._backbone_ref()
+        if backbone is None:
+            raise RuntimeError("Hessian_Head backbone reference is no longer valid")
+        return backbone
+
+    def _hessian_edge_features(
+        self, data: AtomicData, emb: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        add_hessian_graph_batch(
+            data,
+            cutoff=self.cutoff_hessian,
+            use_pbc=self.use_pbc_hessian,
+            fully_connected=self.fully_connected_hessian,
+            radius_pbc_version=self.radius_pbc_version_hessian,
+        )
+
+        wigner, wigner_inv = self.backbone._get_rotmat_and_wigner(
+            data.edge_distance_vec_hessian
+        )
+        coefficient_index = (
+            self.backbone.coefficient_index if self.backbone.mmax != self.backbone.lmax else None
+        )
+        wigner, wigner_inv = self.backbone.backend.prepare_wigner(
+            wigner,
+            wigner_inv,
+            self.backbone.mappingReduced,
+            coefficient_index,
+        )
+
+        dist_scaled = data.edge_distance_hessian / self.cutoff_hessian
+        edge_envelope = self.backbone.envelope(dist_scaled).reshape(-1, 1, 1)
+        edge_distance_embedding = self.distance_expansion_hessian(
+            data.edge_distance_hessian
+        )
+        atomic_numbers_full = data.get("atomic_numbers_full", data.atomic_numbers)
+        source_embedding = self.backbone.source_embedding(
+            atomic_numbers_full[data.edge_index_hessian[0]]
+        )
+        target_embedding = self.backbone.target_embedding(
+            atomic_numbers_full[data.edge_index_hessian[1]]
+        )
+        x_edge = torch.cat(
+            (edge_distance_embedding, source_embedding, target_embedding),
+            dim=1,
+        )
+        x_edge = self.backbone.backend.get_layer_radial_emb(x_edge, self.backbone)[-1]
+        wigner_inv_envelope = wigner_inv * edge_envelope
+        return x_edge, wigner, wigner_inv_envelope
+
+    def forward(
+        self, data: AtomicData, emb: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        if gp_utils.initialized():
+            raise NotImplementedError("Hessian_Head does not support graph parallelism")
+
+        x_edge, wigner, wigner_inv_envelope = self._hessian_edge_features(data, emb)
+        self.backbone.set_MOLE_sizes(
+            nsystems=data.natoms.numel(),
+            batch_full=data.get("batch_full", data.batch),
+            edge_index=data.edge_index_hessian,
+        )
+        edge_features = self.backbone.blocks[
+            self.edge_wise_block_idx
+        ].edge_wise.forward_messages(
+            emb["node_embedding"],
+            x_edge,
+            data.edge_index_hessian,
+            wigner,
+            wigner_inv_envelope,
+            total_atoms_across_gp_ranks=data.pos.shape[0],
+        )
+
+        node_l012 = get_l_component_range(
+            emb["node_embedding"], l_min=0, l_max=2
+        )
+        edge_l012 = get_l_component_range(edge_features, l_min=0, l_max=2)
+        node_irreps = self.node_projection(node_l012).squeeze(-1)
+        edge_irreps = self.edge_projection(edge_l012).squeeze(-1)
+        basis = self.cartesian_wigner_3j_basis.to(
+            device=node_irreps.device, dtype=node_irreps.dtype
+        )
+        node_blocks = irreps_to_cartesian_matrix(node_irreps, basis)
+        edge_blocks = irreps_to_cartesian_matrix(edge_irreps, basis)
+        hessian = blocks3x3_to_hessian(
+            data.edge_index_hessian,
+            data,
+            edge_blocks,
+            node_blocks,
+        )
+        return {"hessian": hessian}
 
 
 def compose_tensor(
