@@ -1,0 +1,32 @@
+defaults:
+  - horm_uma_hip_100
+  - _self_
+
+job:
+  run_dir: outputs/horm_uma_hip_full
+  run_name: horm_uma_hip_full
+  logger:
+    group: horm_uma_hip_full
+
+steps: 200000
+epochs: null
+batch_size: 128
+train_max_batches: null
+eval_max_batches: 4
+eval_every_n_steps: null
+eval_every_n_epochs: 1
+checkpoint_every_n_steps: 500
+
+omol_train:
+  splits:
+    train:
+      src: data/horm_atomic/ts1x_hess_train.atomic.lmdb
+      metadata_path: data/horm_atomic/ts1x_hess_train.atomic.metadata.npz
+      first_n: null
+
+omol_val:
+  splits:
+    val:
+      src: data/horm_atomic/ts1x-val.atomic.lmdb
+      metadata_path: data/horm_atomic/ts1x-val.atomic.metadata.npz
+      first_n: 4096

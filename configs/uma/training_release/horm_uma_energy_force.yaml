@@ -11,7 +11,13 @@ job:
   debug: False
   run_dir: outputs/horm_uma_energy_force_from_scratch
   run_name: horm_uma_energy_force
-  logger: null
+  logger:
+    _target_: fairchem.core.common.logger.WandBSingletonLogger.init_wandb
+    _partial_: true
+    entity: andreas-burger
+    project: uma
+    group: horm_uma_energy_force
+    job_type: training
 
 backbone:
   use_pbc: False
@@ -26,11 +32,14 @@ cutoff_radius: 6
 epochs: null
 steps: 1000
 eval_every_n_steps: 250
+eval_every_n_epochs: null
 checkpoint_every_n_steps: 250
-batch_size: 8
+batch_size: 128
+train_max_batches: null
+eval_max_batches: null
 bf16: False
 normalizer_rmsd: 1.0
-direct_forces_coef: 2
+direct_forces_coef: 30
 omol_energy_coef: 20
 regress_stress: False
 direct_forces: True
@@ -191,7 +200,10 @@ runner:
     bf16: ${bf16}
   max_epochs: ${epochs}
   max_steps: ${steps}
+  max_train_steps_per_epoch: ${train_max_batches}
   evaluate_every_n_steps: ${eval_every_n_steps}
+  evaluate_every_n_epochs: ${eval_every_n_epochs}
+  max_eval_steps_per_epoch: ${eval_max_batches}
   callbacks:
     - _target_: fairchem.core.components.train.train_runner.TrainCheckpointCallback
       checkpoint_every_n_steps: ${checkpoint_every_n_steps}

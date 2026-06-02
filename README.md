@@ -1,3 +1,122 @@
+# HIP-UMA Notes
+
+This fork adds HORM/TS1x training support for UMA with Hessian targets. The
+upstream FairChem README starts after this section.
+
+## HIP-UMA Installation
+
+Create a local `uv` environment from the repo root:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv venv .venv --python 3.12
+source .venv/bin/activate
+uv pip install -e "packages/fairchem-core[dev,extras]"
+uv pip install kagglehub torch-geometric
+source setup_cuda.sh
+```
+
+`setup_cuda.sh` is needed on the cluster so CUDA libraries installed inside
+`.venv` are visible to PyTorch, CuPy, and related packages.
+
+## HORM Dataset
+
+The HORM source data was downloaded from KaggleHub:
+
+```bash
+export KAGGLEHUB_CACHE="$PWD/data/kagglehub"
+uv run python - <<'PY'
+import kagglehub
+
+path = kagglehub.dataset_download(
+    "yunhonghan/hessian-dataset-for-optimizing-reactive-mliphorm"
+)
+print(path)
+PY
+```
+
+That creates the source LMDBs under:
+
+```text
+data/kagglehub/datasets/yunhonghan/hessian-dataset-for-optimizing-reactive-mliphorm/versions/6/
+```
+
+Convert the HIP/PyG-pickled LMDBs to FAIRChem `AtomicData` LMDBs:
+
+```bash
+sbatch scripts/submit_convert_horm_ts1x_train.sh
+
+uv run python tools/convert_hip_lmdb_to_atomic_lmdb.py \
+  --input data/kagglehub/datasets/yunhonghan/hessian-dataset-for-optimizing-reactive-mliphorm/versions/6/ts1x-val.lmdb \
+  --output data/horm_atomic/ts1x-val.atomic.lmdb \
+  --metadata data/horm_atomic/ts1x-val.atomic.metadata.npz \
+  --dataset-name ts1x_val
+
+uv run python tools/convert_hip_lmdb_to_atomic_lmdb.py \
+  --input data/kagglehub/datasets/yunhonghan/hessian-dataset-for-optimizing-reactive-mliphorm/versions/6/RGD1.lmdb \
+  --output data/horm_atomic/RGD1.atomic.lmdb \
+  --metadata data/horm_atomic/RGD1.atomic.metadata.npz \
+  --dataset-name RGD1
+```
+
+Validate the converted TS1x train LMDB:
+
+```bash
+sbatch scripts/validate_horm_ts1x_train.sh
+```
+
+## W&B
+
+W&B is enabled in the training YAMLs via `job.logger`. Before another user runs
+training, update the account in:
+
+```text
+configs/uma/training_release/horm_uma_energy_force.yaml
+configs/uma/training_release/horm_uma_hessian.yaml
+```
+
+Change:
+
+```yaml
+entity: andreas-burger
+project: uma
+```
+
+to the target W&B entity/project.
+
+## Training Jobs
+
+Use the generic SLURM wrapper for HIP-UMA jobs. It requests one GPU, 16 CPUs,
+128G memory, and a 4 hour allocation. Full-training configs run uncapped train
+epochs and cap validation to a few batches per epoch.
+
+```bash
+sbatch --job-name=horm_uma_ef_100 \
+  scripts/submit_horm_uma_gpu.sh \
+  configs/uma/training_release/horm_uma_energy_force_100.yaml
+
+sbatch --job-name=horm_uma_ef_full \
+  scripts/submit_horm_uma_gpu.sh \
+  configs/uma/training_release/horm_uma_energy_force_full.yaml
+
+sbatch --job-name=horm_uma_hip_100 \
+  scripts/submit_horm_uma_gpu.sh \
+  configs/uma/training_release/horm_uma_hip_100.yaml
+
+sbatch --job-name=horm_uma_hip_full \
+  scripts/submit_horm_uma_gpu.sh \
+  configs/uma/training_release/horm_uma_hip_full.yaml
+```
+
+Optional Hydra overrides can be appended after the config path, for example:
+
+```bash
+sbatch --job-name=horm_uma_hip_full \
+  scripts/submit_horm_uma_gpu.sh \
+  configs/uma/training_release/horm_uma_hip_full.yaml \
+  steps=50000 train_max_batches=500 eval_max_batches=4
+```
+
 [//]: # (<h1 align="center">)
 
 [//]: # ()

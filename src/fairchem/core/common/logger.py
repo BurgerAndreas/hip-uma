@@ -8,6 +8,7 @@ LICENSE file in the root directory of this source tree.
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,16 @@ from fairchem.core.common.utils import tensor_stats
 
 if TYPE_CHECKING:
     from pandas import DataFrame
+
+
+def _log_slurm_job_id_to_wandb() -> None:
+    slurm_job_id = os.environ.get("SLURM_JOB_ID")
+    if not slurm_job_id or wandb.run is None:
+        return
+
+    slurm_job_id = str(slurm_job_id)
+    wandb.config.update({"slurm_job_id": slurm_job_id}, allow_val_change=True)
+    wandb.run.summary["slurm_job_id"] = slurm_job_id
 
 
 class Logger(ABC):
@@ -96,6 +107,7 @@ class WandBLogger(Logger):
             resume="allow",
             group=group,
         )
+        _log_slurm_job_id_to_wandb()
 
     def watch(self, model, log="all", log_freq: int = 1000) -> None:
         wandb.watch(model, log=log, log_freq=log_freq)
@@ -233,6 +245,7 @@ class WandBSingletonLogger:
             group=group,
             job_type=job_type,
         )
+        _log_slurm_job_id_to_wandb()
 
     @classmethod
     def get_instance(cls):

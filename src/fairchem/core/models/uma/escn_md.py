@@ -79,7 +79,7 @@ from fairchem.core.units.mlip_unit.api.inference import (
 )
 from fairchem.core.units.mlip_unit.mlip_unit import OutputSpec, Task
 
-from .escn_md_block import eSCNMD_Block
+from .escn_md_block import Edgewise, eSCNMD_Block
 
 if TYPE_CHECKING:
     from ase import Atoms
@@ -1205,6 +1205,7 @@ class Hessian_Head(nn.Module, HeadInterface):
     def __init__(
         self,
         backbone: eSCNMDBackbone,
+        num_layers_hessian: int = 1,
         cutoff_hessian: float = 100.0,
         fully_connected_hessian: bool = True,
         use_pbc_hessian: bool = False,
@@ -1213,10 +1214,11 @@ class Hessian_Head(nn.Module, HeadInterface):
         super().__init__()
         if backbone.lmax < 2:
             raise ValueError("Hessian_Head requires backbone.lmax >= 2")
-        if len(backbone.blocks) == 0:
-            raise ValueError("Hessian_Head requires at least one eSCNMD block")
+        if num_layers_hessian < 0:
+            raise ValueError("num_layers_hessian must be non-negative")
 
         object.__setattr__(self, "_backbone_ref", weakref.ref(backbone))
+        self.num_layers_hessian = num_layers_hessian
         self.cutoff_hessian = cutoff_hessian
         self.fully_connected_hessian = fully_connected_hessian
         self.use_pbc_hessian = use_pbc_hessian
@@ -1225,7 +1227,44 @@ class Hessian_Head(nn.Module, HeadInterface):
             if radius_pbc_version_hessian is not None
             else backbone.radius_pbc_version
         )
-        self.edge_wise_block_idx = len(backbone.blocks) - 1
+        self.blocks = nn.ModuleList(
+            [
+                eSCNMD_Block(
+                    backbone.sphere_channels,
+                    backbone.hidden_channels,
+                    backbone.lmax,
+                    backbone.mmax,
+                    backbone.mappingReduced,
+                    backbone.SO3_grid,
+                    backbone.edge_channels_list,
+                    self.cutoff_hessian,
+                    backbone.norm_type,
+                    backbone.act_type,
+                    backbone.ff_type,
+                    activation_checkpoint_chunk_size=None,
+                    backend=backbone.backend,
+                )
+                for _ in range(self.num_layers_hessian)
+            ]
+        )
+        self.norm = get_normalization_layer(
+            backbone.norm_type,
+            lmax=backbone.lmax,
+            num_channels=backbone.sphere_channels,
+        )
+        self.edge_readout = Edgewise(
+            sphere_channels=backbone.sphere_channels,
+            hidden_channels=backbone.hidden_channels,
+            lmax=backbone.lmax,
+            mmax=backbone.mmax,
+            edge_channels_list=backbone.edge_channels_list,
+            mappingReduced=backbone.mappingReduced,
+            SO3_grid=backbone.SO3_grid,
+            cutoff=self.cutoff_hessian,
+            act_type=backbone.act_type,
+            activation_checkpoint_chunk_size=None,
+            backend=backbone.backend,
+        )
         self.node_projection = SO3_Linear(backbone.sphere_channels, 1, lmax=2)
         self.edge_projection = SO3_Linear(backbone.sphere_channels, 1, lmax=2)
         self.distance_expansion_hessian = GaussianSmearing(
@@ -1287,7 +1326,6 @@ class Hessian_Head(nn.Module, HeadInterface):
             (edge_distance_embedding, source_embedding, target_embedding),
             dim=1,
         )
-        x_edge = self.backbone.backend.get_layer_radial_emb(x_edge, self.backbone)[-1]
         wigner_inv_envelope = wigner_inv * edge_envelope
         return x_edge, wigner, wigner_inv_envelope
 
@@ -1303,10 +1341,21 @@ class Hessian_Head(nn.Module, HeadInterface):
             batch_full=data.get("batch_full", data.batch),
             edge_index=data.edge_index_hessian,
         )
-        edge_features = self.backbone.blocks[
-            self.edge_wise_block_idx
-        ].edge_wise.forward_messages(
-            emb["node_embedding"],
+        node_embedding = emb["node_embedding"].clone()
+        for layer_idx, block in enumerate(self.blocks):
+            with record_function(f"hessian message passing {layer_idx}"):
+                node_embedding = block(
+                    node_embedding,
+                    x_edge,
+                    data.edge_index_hessian,
+                    wigner,
+                    wigner_inv_envelope,
+                    total_atoms_across_gp_ranks=data.pos.shape[0],
+                )
+
+        node_embedding = self.norm(node_embedding)
+        edge_features = self.edge_readout.forward_messages(
+            node_embedding,
             x_edge,
             data.edge_index_hessian,
             wigner,
@@ -1315,7 +1364,7 @@ class Hessian_Head(nn.Module, HeadInterface):
         )
 
         node_l012 = get_l_component_range(
-            emb["node_embedding"], l_min=0, l_max=2
+            node_embedding, l_min=0, l_max=2
         )
         edge_l012 = get_l_component_range(edge_features, l_min=0, l_max=2)
         node_irreps = self.node_projection(node_l012).squeeze(-1)

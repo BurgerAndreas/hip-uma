@@ -1,0 +1,28 @@
+defaults:
+  - horm_uma_energy_force
+  - _self_
+
+job:
+  run_dir: outputs/horm_uma_energy_force_full
+  run_name: horm_uma_energy_force_full
+  logger:
+    group: horm_uma_energy_force_full
+
+steps: 200000
+epochs: null
+batch_size: 128
+train_max_batches: null
+eval_max_batches: 4
+eval_every_n_steps: null
+eval_every_n_epochs: 1
+checkpoint_every_n_steps: 500
+
+omol_train:
+  splits:
+    train:
+      first_n: null
+
+omol_val:
+  splits:
+    val:
+      first_n: 4096

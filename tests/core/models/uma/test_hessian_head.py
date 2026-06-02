@@ -97,6 +97,7 @@ def _tiny_hydra_model() -> HydraModel:
         heads={
             "hessian": {
                 "module": "fairchem.core.models.uma.escn_md.Hessian_Head",
+                "num_layers_hessian": 1,
                 "cutoff_hessian": 10.0,
                 "fully_connected_hessian": True,
                 "use_pbc_hessian": False,
@@ -110,6 +111,7 @@ def test_hessian_head_forward_variable_natoms_batch():
     backbone = _tiny_backbone()
     head = Hessian_Head(
         backbone,
+        num_layers_hessian=1,
         cutoff_hessian=10.0,
         fully_connected_hessian=True,
         use_pbc_hessian=False,
@@ -127,6 +129,9 @@ def test_hessian_head_forward_variable_natoms_batch():
     emb = backbone(batch)
     out = head(batch, emb)
 
+    assert len(head.blocks) == 1
+    assert head.edge_readout is not backbone.blocks[-1].edge_wise
+    assert head.blocks[0] is not backbone.blocks[-1]
     assert out["hessian"].shape == (117,)
     assert batch.edge_index_hessian.shape == (2, 8)
     assert batch.nedges_hessian.tolist() == [2, 6]

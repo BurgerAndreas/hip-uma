@@ -1,0 +1,120 @@
+defaults:
+  - horm_uma_energy_force
+  - _self_
+
+job:
+  run_dir: outputs/horm_uma_hip_100
+  run_name: horm_uma_hip_100
+  logger:
+    group: horm_uma_hip_100
+
+epochs: 10000
+steps: null
+batch_size: 128
+eval_every_n_steps: null
+eval_every_n_epochs: 100
+checkpoint_every_n_steps: 250
+exclude_keys: []
+num_layers_hessian: 1
+cutoff_hessian: 100.0
+fully_connected_hessian: True
+use_pbc_hessian: False
+hessian_coef: 30
+hessian_loss_mode: mae
+
+omol_train:
+  splits:
+    train:
+      src: data/hip_sample_100/sample_100.atomic.lmdb
+      metadata_path: data/hip_sample_100/sample_100.atomic.metadata.npz
+
+omol_val:
+  splits:
+    val:
+      src: data/hip_sample_100/sample_100.atomic.lmdb
+      metadata_path: data/hip_sample_100/sample_100.atomic.metadata.npz
+
+heads:
+  omol_energy:
+    module: fairchem.core.models.uma.escn_md.MLP_Energy_Head
+  forces:
+    module: fairchem.core.models.uma.escn_md.Linear_Force_Head
+  hessian:
+    module: fairchem.core.models.uma.escn_md.Hessian_Head
+    num_layers_hessian: ${num_layers_hessian}
+    cutoff_hessian: ${cutoff_hessian}
+    fully_connected_hessian: ${fully_connected_hessian}
+    use_pbc_hessian: ${use_pbc_hessian}
+
+tasks:
+- _target_: fairchem.core.units.mlip_unit.mlip_unit.Task
+  name: omol_energy
+  level: system
+  property: energy
+  loss_fn:
+    _target_: fairchem.core.modules.loss.DDPMTLoss
+    loss_fn:
+      _target_: fairchem.core.modules.loss.PerAtomMAELoss
+    coefficient: ${omol_energy_coef}
+  out_spec:
+    dim: [1]
+    dtype: float32
+  normalizer:
+    _target_: fairchem.core.modules.normalization.normalizer.Normalizer
+    mean: 0.0
+    rmsd: ${normalizer_rmsd}
+  datasets:
+    - omol
+  metrics:
+    - mae
+    - per_atom_mae
+- _target_: fairchem.core.units.mlip_unit.mlip_unit.Task
+  name: forces
+  level: atom
+  property: forces
+  train_on_free_atoms: True
+  eval_on_free_atoms: True
+  loss_fn:
+    _target_: fairchem.core.modules.loss.DDPMTLoss
+    loss_fn:
+      _target_: fairchem.core.modules.loss.L2NormLoss
+    reduction: mean
+    coefficient: ${direct_forces_coef}
+  out_spec:
+    dim: [3]
+    dtype: float32
+  normalizer:
+    _target_: fairchem.core.modules.normalization.normalizer.Normalizer
+    mean: 0.0
+    rmsd: ${normalizer_rmsd}
+  datasets:
+    - omol
+  metrics:
+    - mae
+    - cosine_similarity
+    - magnitude_error
+- _target_: fairchem.core.units.mlip_unit.mlip_unit.Task
+  name: hessian
+  level: system
+  property: hessian
+  loss_fn:
+    _target_: fairchem.core.modules.loss.HessianLoss
+    mode: ${hessian_loss_mode}
+    reduction: structure_mean
+    coefficient: ${hessian_coef}
+  out_spec:
+    dim: [1]
+    dtype: float32
+  normalizer:
+    _target_: fairchem.core.modules.normalization.normalizer.Normalizer
+    mean: 0.0
+    rmsd: ${normalizer_rmsd}
+  datasets:
+    - omol
+  metrics:
+    - hessian_mae
+    - hessian_mse
+    - hessian_rmse
+    - hessian_eckart_eigenvalue_mae
+    - hessian_eckart_eigvec1_cos
+    - hessian_eckart_eigvec2_cos

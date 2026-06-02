@@ -1,0 +1,28 @@
+defaults:
+  - horm_uma_energy_force
+  - _self_
+
+job:
+  run_dir: outputs/horm_uma_energy_force_100
+  run_name: horm_uma_energy_force_100
+  logger:
+    group: horm_uma_energy_force_100
+
+epochs: 10000
+steps: null
+batch_size: 128
+eval_every_n_steps: null
+eval_every_n_epochs: 100
+checkpoint_every_n_steps: 250
+
+omol_train:
+  splits:
+    train:
+      src: data/hip_sample_100/sample_100.atomic.lmdb
+      metadata_path: data/hip_sample_100/sample_100.atomic.metadata.npz
+
+omol_val:
+  splits:
+    val:
+      src: data/hip_sample_100/sample_100.atomic.lmdb
+      metadata_path: data/hip_sample_100/sample_100.atomic.metadata.npz
