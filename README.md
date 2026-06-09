@@ -1,7 +1,6 @@
 # HIP-UMA Notes
 
-This fork adds HORM/TS1x training support for UMA with Hessian targets. The
-upstream FairChem README starts after this section.
+This fork adds Hessian prediction support for UMA, following [Hessian Interatomic Potentials (HIP)](https://arxiv.org/abs/2509.21624). We train on the HORM-TS1x dataset.
 
 ## HIP-UMA Installation
 
