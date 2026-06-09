@@ -2,6 +2,8 @@
 
 This fork adds Hessian prediction support for UMA, following [Hessian Interatomic Potentials (HIP)](https://arxiv.org/abs/2509.21624). We train on the HORM-TS1x dataset.
 
+Example run: https://api.wandb.ai/links/andreas-burger/ckdi5mnn
+
 ## HIP-UMA Installation
 
 Create a local `uv` environment from the repo root:
