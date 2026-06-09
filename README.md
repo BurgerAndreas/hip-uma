@@ -1,6 +1,6 @@
 # HIP-UMA Notes
 
-This fork adds Hessian prediction support for UMA, following [Hessian Interatomic Potentials (HIP)](https://arxiv.org/abs/2509.21624). We train on the HORM-TS1x dataset.
+This fork adds Hessian prediction support for UMA, following [Hessian Interatomic Potentials (HIP)](https://arxiv.org/abs/2509.21624). We train on the HORM-T1x dataset.
 
 Example run: https://api.wandb.ai/links/andreas-burger/ckdi5mnn
 
