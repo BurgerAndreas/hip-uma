@@ -4,16 +4,16 @@ source:
   filename: uma-s-1p1.pt
   subfolder: checkpoints
   revision: null
-  checkpoint_path: /lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--UMA/snapshots/7210de6fe86ad94854b21b881fefbcfdfeab373b/checkpoints/uma-s-1p1.pt
+  checkpoint_path: ${oc.env:UMA_MODEL_ROOT}/checkpoints/uma-s-1p1.pt
   checkpoint_size_bytes: 1173759575
   checkpoint_md5: 36a2f071350be0ee4c15e7ebdd16dde1
   references:
     atom_refs:
-      path: /lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--UMA/snapshots/7210de6fe86ad94854b21b881fefbcfdfeab373b/references/iso_atom_elem_refs.yaml
+      path: ${oc.env:UMA_MODEL_ROOT}/references/iso_atom_elem_refs.yaml
       subfolder: references
       filename: iso_atom_elem_refs.yaml
     form_elem_refs:
-      path: /lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--UMA/snapshots/7210de6fe86ad94854b21b881fefbcfdfeab373b/references/form_elem_refs.yaml
+      path: ${oc.env:UMA_MODEL_ROOT}/references/form_elem_refs.yaml
       subfolder: references
       filename: form_elem_refs.yaml
 checkpoint_type: fairchem.core.units.mlip_unit.api.inference.MLIPInferenceCheckpoint

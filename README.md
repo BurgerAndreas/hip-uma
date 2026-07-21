@@ -2,6 +2,77 @@
 
 This fork adds Hessian prediction support for UMA, following [Hessian Interatomic Potentials (HIP)](https://arxiv.org/abs/2509.21624). We train on the HORM-TS1x dataset.
 
+## HIP-UMA Checkpoints
+
+The final full-data models are hosted in the
+[`andreasburger/hip`](https://huggingface.co/andreasburger/hip/tree/main/hip-uma)
+Hugging Face repository:
+
+| Model | Training targets | Hugging Face file | SHA-256 |
+|---|---|---|---|
+| HIP-UMA | Energy, forces, and Hessian | `hip-uma/hip-uma-hessian.pt` | `799e59b09e821cda471fb888505668dce7f23e8f49f83b474266d7c04923375e` |
+| UMA baseline | Energy and forces | `hip-uma/hip-uma-energy-force.pt` | `8337538d633aaf70f1c5eb873ad435662f6576496e1f7902d0da49e8a8765341` |
+
+### HORM-TS1x Validation
+
+Metrics use the EMA weights and the first 10,000 validation structures in
+LMDB order. Errors are averaged per structure, following
+`scripts/eval_horm.py` from the HIP repository. HIP-UMA uses its learned
+Hessian head; the baseline Hessian is computed by twice differentiating its
+learned energy.
+
+| Model | Energy MAE (eV) | Force MAE (eV/Å) | Hessian MAE (eV/Å²) | Hessian RMSE (eV/Å²) |
+|---|---:|---:|---:|---:|
+| HIP-UMA (predicted Hessian) | 0.138652 | 0.024973 | 0.050384 | 0.263295 |
+| UMA energy/force baseline (autograd Hessian) | TBD | TBD | TBD | TBD |
+
+Download both FAIRChem inference checkpoints:
+
+```bash
+uv run python - <<'PY'
+from huggingface_hub import hf_hub_download
+
+for filename in (
+    "hip-uma/hip-uma-hessian.pt",
+    "hip-uma/hip-uma-energy-force.pt",
+):
+    path = hf_hub_download(
+        repo_id="andreasburger/hip",
+        filename=filename,
+        local_dir="checkpoints",
+    )
+    print(path)
+PY
+```
+
+Evaluate energy, forces, and Hessians on the first 10,000 HORM-TS1x
+validation structures. HIP-UMA uses its learned Hessian head; the baseline
+uses the Hessian obtained by twice differentiating its learned energy:
+
+```bash
+uv run python tools/eval_horm_uma.py \
+  --checkpoint checkpoints/hip-uma/hip-uma-hessian.pt \
+  --hessian-method predict \
+  --max-samples 10000 \
+  --output results_evalhorm/hip-uma-hessian.csv
+
+uv run python tools/eval_horm_uma.py \
+  --checkpoint checkpoints/hip-uma/hip-uma-energy-force.pt \
+  --hessian-method autograd \
+  --max-samples 10000 \
+  --output results_evalhorm/hip-uma-energy-force.csv
+```
+
+These are GPU workloads. On SLURM, submit them with the repo's local
+environment wrapper, for example:
+
+```bash
+scripts/submit_with_env.sh eval hip_uma_eval_10k \
+  scripts/submit_eval_horm_uma_10k.sh \
+  checkpoints/hip-uma/hip-uma-hessian.pt predict \
+  results_evalhorm/hip-uma-hessian.csv 10000
+```
+
 ## HIP-UMA Installation
 
 Create a local `uv` environment from the repo root:
@@ -18,12 +89,44 @@ source setup_cuda.sh
 `setup_cuda.sh` is needed on the cluster so CUDA libraries installed inside
 `.venv` are visible to PyTorch, CuPy, and related packages.
 
+## Local Environment Configuration
+
+Machine-, cluster-, and account-specific settings live in a local `.env` file.
+It is gitignored and must not be committed. Create it from the tracked template:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` for your environment:
+
+- `SLURM_ACCOUNT`: your allocation/account; it may be empty if your cluster
+  supplies a default.
+- `SLURM_GPU_PARTITION`, `SLURM_EVAL_PARTITION`, and `SLURM_CPU_PARTITION`:
+  the corresponding partitions on your cluster.
+- `WANDB_ENTITY`, `WANDB_PROJECT`, and `WANDB_MODE`: W&B ownership and logging
+  behavior. Use `WANDB_MODE=disabled` to train without W&B.
+- `FAIRCHEM_CACHE_DIR` and `KAGGLEHUB_CACHE`: local writable cache locations.
+- `UMA_MODEL_ROOT` and `OMOL25_MODEL_ROOT`: local Hugging Face snapshot roots
+  used only by the generated YAMLs under `configs/pretrained/model_configs/`.
+
+The HORM training and validation LMDB paths are intentionally repo-relative
+under `data/`; they do not need machine-specific configuration. Some untouched
+upstream FAIR/EScAIP example profiles still contain their authors' internal
+`/checkpoint/...` paths and are not used by the HIP-UMA workflow.
+
+SLURM reads `#SBATCH` directives before a job script can load `.env`, so submit
+repo jobs through `scripts/submit_with_env.sh`. Its profiles map `gpu`, `eval`,
+and `cpu` to the partitions in `.env`. The wrapper loads `.env` automatically;
+before non-SLURM commands that need these variables, run
+`source scripts/load_local_env.sh`.
+
 ## HORM Dataset
 
 The HORM source data was downloaded from KaggleHub:
 
 ```bash
-export KAGGLEHUB_CACHE="$PWD/data/kagglehub"
+source scripts/load_local_env.sh
 uv run python - <<'PY'
 import kagglehub
 
@@ -43,7 +146,8 @@ data/kagglehub/datasets/yunhonghan/hessian-dataset-for-optimizing-reactive-mliph
 Convert the HIP/PyG-pickled LMDBs to FAIRChem `AtomicData` LMDBs:
 
 ```bash
-sbatch scripts/submit_convert_horm_ts1x_train.sh
+scripts/submit_with_env.sh cpu convert_horm_ts1x_train \
+  scripts/submit_convert_horm_ts1x_train.sh
 
 uv run python tools/convert_hip_lmdb_to_atomic_lmdb.py \
   --input data/kagglehub/datasets/yunhonghan/hessian-dataset-for-optimizing-reactive-mliphorm/versions/6/ts1x-val.lmdb \
@@ -61,27 +165,16 @@ uv run python tools/convert_hip_lmdb_to_atomic_lmdb.py \
 Validate the converted TS1x train LMDB:
 
 ```bash
-sbatch scripts/validate_horm_ts1x_train.sh
+scripts/submit_with_env.sh cpu validate_horm_ts1x_train \
+  scripts/validate_horm_ts1x_train.sh
 ```
 
 ## W&B
 
-W&B is enabled in the training YAMLs via `job.logger`. Before another user runs
-training, update the account in:
-
-```text
-configs/uma/training_release/horm_uma_energy_force.yaml
-configs/uma/training_release/horm_uma_hessian.yaml
-```
-
-Change:
-
-```yaml
-entity: andreas-burger
-project: uma
-```
-
-to the target W&B entity/project.
+W&B is enabled in the training YAMLs via `job.logger`. The entity and project
+are read from `WANDB_ENTITY` and `WANDB_PROJECT` in `.env`; no tracked YAML
+needs to be edited for another user. Authenticate separately with `wandb login`,
+or set `WANDB_MODE=disabled` locally.
 
 ## Training Jobs
 
@@ -90,19 +183,19 @@ Use the generic SLURM wrapper for HIP-UMA jobs. It requests one GPU, 16 CPUs,
 epochs and cap validation to a few batches per epoch.
 
 ```bash
-sbatch --job-name=horm_uma_ef_100 \
+scripts/submit_with_env.sh gpu horm_uma_ef_100 \
   scripts/submit_horm_uma_gpu.sh \
   configs/uma/training_release/horm_uma_energy_force_100.yaml
 
-sbatch --job-name=horm_uma_ef_full \
+scripts/submit_with_env.sh gpu horm_uma_ef_full \
   scripts/submit_horm_uma_gpu.sh \
   configs/uma/training_release/horm_uma_energy_force_full.yaml
 
-sbatch --job-name=horm_uma_hip_100 \
+scripts/submit_with_env.sh gpu horm_uma_hip_100 \
   scripts/submit_horm_uma_gpu.sh \
   configs/uma/training_release/horm_uma_hip_100.yaml
 
-sbatch --job-name=horm_uma_hip_full \
+scripts/submit_with_env.sh gpu horm_uma_hip_full \
   scripts/submit_horm_uma_gpu.sh \
   configs/uma/training_release/horm_uma_hip_full.yaml
 ```
@@ -110,7 +203,7 @@ sbatch --job-name=horm_uma_hip_full \
 Optional Hydra overrides can be appended after the config path, for example:
 
 ```bash
-sbatch --job-name=horm_uma_hip_full \
+scripts/submit_with_env.sh gpu horm_uma_hip_full \
   scripts/submit_horm_uma_gpu.sh \
   configs/uma/training_release/horm_uma_hip_full.yaml \
   steps=50000 train_max_batches=500 eval_max_batches=4

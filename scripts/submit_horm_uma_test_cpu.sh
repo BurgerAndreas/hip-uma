@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=horm_uma_test_cpu
-#SBATCH --account=nvr_qualg_lmbm
-#SBATCH --partition=cpu
 #SBATCH --time=01:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -14,10 +12,11 @@ set -euo pipefail
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
 cd "$REPO_ROOT"
+source scripts/load_local_env.sh
 
 source ./setup_cuda.sh >/dev/null
 
-export FAIRCHEM_CACHE_DIR="$REPO_ROOT/.cache/fairchem"
+export FAIRCHEM_CACHE_DIR="${FAIRCHEM_CACHE_DIR:-$REPO_ROOT/.cache/fairchem}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 uv run python main.py \

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-#SBATCH --account=nvr_qualg_lmbm
-#SBATCH --partition=batch_singlenode
 #SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -13,7 +11,7 @@
 set -euo pipefail
 
 if [[ "$#" -lt 1 ]]; then
-  echo "Usage: sbatch --job-name=<name> $0 <config.yaml> [hydra overrides...]" >&2
+  echo "Usage: scripts/submit_with_env.sh gpu JOB_NAME $0 <config.yaml> [hydra overrides...]" >&2
   exit 2
 fi
 
@@ -23,10 +21,11 @@ EXTRA_ARGS=("$@")
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
 cd "$REPO_ROOT"
+source scripts/load_local_env.sh
 
 source ./setup_cuda.sh >/dev/null
 
-export FAIRCHEM_CACHE_DIR="$REPO_ROOT/.cache/fairchem"
+export FAIRCHEM_CACHE_DIR="${FAIRCHEM_CACHE_DIR:-$REPO_ROOT/.cache/fairchem}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
 
 mkdir -p outputs/slurm_run_ids
@@ -75,7 +74,7 @@ fi
 
 if [[ "$status" -eq 124 || "$status" -eq 137 || "$status" -eq 143 ]]; then
   echo "Training slice ended with status=$status; submitting continuation for $JOB_KEY"
-  next_job="$(sbatch --job-name="$JOB_KEY" "$0" "$CONFIG" "${EXTRA_ARGS[@]}")"
+  next_job="$(scripts/submit_with_env.sh gpu "$JOB_KEY" scripts/submit_horm_uma_gpu.sh "$CONFIG" "${EXTRA_ARGS[@]}")"
   echo "$next_job"
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$next_job" \
     >> "outputs/slurm_run_ids/${JOB_KEY}.resubmissions"

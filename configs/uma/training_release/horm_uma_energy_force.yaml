@@ -14,8 +14,8 @@ job:
   logger:
     _target_: fairchem.core.common.logger.WandBSingletonLogger.init_wandb
     _partial_: true
-    entity: andreas-burger
-    project: uma
+    entity: ${oc.env:WANDB_ENTITY,null}
+    project: ${oc.env:WANDB_PROJECT,uma}
     group: horm_uma_energy_force
     job_type: training
 

@@ -4,12 +4,12 @@ source:
   filename: esen_sm_direct_all.pt
   subfolder: checkpoints
   revision: null
-  checkpoint_path: /lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--OMol25/snapshots/039b7070e59d1537e56c93a3a455263d062ed9c8/checkpoints/esen_sm_direct_all.pt
+  checkpoint_path: ${oc.env:OMOL25_MODEL_ROOT}/checkpoints/esen_sm_direct_all.pt
   checkpoint_size_bytes: 50960291
   checkpoint_md5: 29d35d95c87e2ca4885a6bdd4e1f5d27
   references:
     atom_refs:
-      path: /lustre/fs1/portfolios/nvr/projects/nvr_qualg_lmbm/users/anburger/hip-uma/.cache/fairchem/models--facebook--OMol25/snapshots/039b7070e59d1537e56c93a3a455263d062ed9c8/references/iso_atom_elem_refs.yaml
+      path: ${oc.env:OMOL25_MODEL_ROOT}/references/iso_atom_elem_refs.yaml
       subfolder: references
       filename: iso_atom_elem_refs.yaml
 checkpoint_type: fairchem.core.units.mlip_unit.api.inference.MLIPInferenceCheckpoint
