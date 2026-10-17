@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -29,48 +30,159 @@ def validation_mask(indices):
 
 
 def make_batch(values, rows):
-    """Pack an equal-size batch directly, without per-molecule ASE objects."""
-    n = int(values["natoms"][rows[0]])
-    assert np.all(values["natoms"][rows] == n)
+    """Pack ragged molecules directly, without per-molecule ASE objects."""
+    sizes = values["natoms"][rows].astype(np.int64)
     b = len(rows)
-    if np.all(values["natoms"] == n):
-        numbers = values["atomic_numbers"].reshape(-1, n)[rows].reshape(-1)
-        coords = values["coords"].reshape(-1, n, 3)[rows].reshape(-1, 3)
-        labels = values["hessian_flat"].reshape(-1, 9 * n * n)[rows].reshape(-1)
-    else:
-        ptr, hp = values["atom_ptr"], values["hessian_ptr"]
-        numbers = np.concatenate(
-            [values["atomic_numbers"][ptr[r] : ptr[r + 1]] for r in rows]
-        )
-        coords = np.concatenate([values["coords"][ptr[r] : ptr[r + 1]] for r in rows])
-        labels = np.concatenate(
-            [values["hessian_flat"][hp[r] : hp[r + 1]] for r in rows]
-        )
-    # Match ASE teacher centering in float64 before conversion to FP32.
-    centered = coords.reshape(b, n, 3).astype(np.float64)
-    minimum = centered.min(axis=1, keepdims=True)
-    extent = centered.max(axis=1) - minimum[:, 0, :]
-    centered = (centered - minimum + 120.0).astype(np.float32)
-    cells = np.zeros((b, 3, 3), dtype=np.float32)
-    cells[:, np.arange(3), np.arange(3)] = extent + 240.0
+    ptr = values.get("atom_ptr", np.r_[0, np.cumsum(values["natoms"])])
+    hp = values.get(
+        "hessian_ptr", np.r_[0, np.cumsum(9 * values["natoms"].astype(np.int64) ** 2)]
+    )
+    numbers = np.concatenate(
+        [values["atomic_numbers"][ptr[r] : ptr[r + 1]] for r in rows]
+    )
+    positions, cells = [], np.zeros((b, 3, 3), dtype=np.float32)
+    for i, r in enumerate(rows):
+        # Match ASE teacher centering in float64 before conversion to FP32.
+        xyz = values["coords"][ptr[r] : ptr[r + 1]].astype(np.float64)
+        low = xyz.min(axis=0)
+        cells[i, np.arange(3), np.arange(3)] = xyz.max(axis=0) - low + 240.0
+        positions.append((xyz - low + 120.0).astype(np.float32))
+    labels = np.concatenate([values["hessian_flat"][hp[r] : hp[r + 1]] for r in rows])
     return AtomicData(
-        pos=torch.from_numpy(centered.reshape(-1, 3)),
+        pos=torch.from_numpy(np.concatenate(positions)),
         atomic_numbers=torch.from_numpy(numbers.astype(np.int64)),
         cell=torch.from_numpy(cells),
         pbc=torch.zeros(b, 3, dtype=torch.bool),
-        natoms=torch.full((b,), n, dtype=torch.long),
+        natoms=torch.from_numpy(sizes),
         edge_index=torch.empty(2, 0, dtype=torch.long),
         cell_offsets=torch.empty(0, 3),
         nedges=torch.zeros(b, dtype=torch.long),
         charge=torch.from_numpy(values["charge"][rows].astype(np.int64)),
         spin=torch.from_numpy(values["spin"][rows].astype(np.int64)),
-        fixed=torch.zeros(b * n, dtype=torch.long),
-        tags=torch.ones(b * n, dtype=torch.long),
+        fixed=torch.zeros(int(sizes.sum()), dtype=torch.long),
+        tags=torch.ones(int(sizes.sum()), dtype=torch.long),
         hessian=torch.from_numpy(labels.copy()),
-        batch=torch.arange(b).repeat_interleave(n),
+        batch=torch.arange(b).repeat_interleave(torch.from_numpy(sizes)),
         dataset=["omol"] * b,
         sid=[str(x) for x in values["omol_index"][rows]],
     )
+
+
+class BalancedBatchSampler:
+    """Best-fit batches with atom, molecule, and quadratic memory limits.
+
+    Oversized molecules form singleton batches. No sample is dropped or repeated.
+    Largest-first packing reduces unused atom capacity within a shard window.
+    """
+
+    def __init__(self, sizes, *, max_atoms, batch_size=64, pair_budget=131072):
+        if min(max_atoms, batch_size, pair_budget) < 1:
+            raise ValueError("Batch limits must be positive")
+        self.sizes = np.asarray(sizes, dtype=np.int64)
+        if np.any(self.sizes < 1):
+            raise ValueError("Each molecule must contain at least one atom")
+        self.max_atoms = max_atoms
+        self.batch_size = batch_size
+        self.pair_budget = pair_budget
+
+    def __iter__(self):
+        batches, atoms, pairs = [], [], []
+        for row in np.argsort(-self.sizes, kind="stable"):
+            n = int(self.sizes[row])
+            feasible = [
+                i
+                for i, batch in enumerate(batches)
+                if len(batch) < self.batch_size
+                and atoms[i] + n <= self.max_atoms
+                and pairs[i] + n * n <= self.pair_budget
+            ]
+            if feasible:
+                i = max(feasible, key=lambda i: atoms[i])
+                batches[i].append(int(row))
+                atoms[i] += n
+                pairs[i] += n * n
+            else:
+                batches.append([int(row)])
+                atoms.append(n)
+                pairs.append(n * n)
+        yield from batches
+
+
+def microbatch_indices(batch, sizes, pair_budget):
+    """
+    Split one optimizer batch into bounded quadratic work units without losses.
+    """
+    result, current, pairs = [], [], 0
+    for index in batch:
+        cost = int(sizes[index]) ** 2
+        if current and pairs + cost > pair_budget:
+            result.append(current)
+            current, pairs = [], 0
+        current.append(index)
+        pairs += cost
+    if current:
+        result.append(current)
+    return result
+
+
+def pack_window_batch(window, selected):
+    """Pack samples across source shards and retain cache scatter metadata."""
+    chunks = []
+    groups = []
+    cached = []
+    offset = 0
+    for source, rows in selected:
+        values, meta, features = window[source]
+        part = make_batch(values, np.asarray(rows))
+        chunks.append(part)
+        ptr = values["atom_ptr"]
+        spans = [(int(ptr[r]), int(ptr[r + 1])) for r in rows]
+        length = sum(b - a for a, b in spans)
+        groups.append(
+            SimpleNamespace(
+                hip_cache_key=str(Path(meta["path"]).with_suffix("")),
+                hip_total_atoms=int(ptr[-1]),
+                hip_row_count=len(values["natoms"]),
+                hip_rows=rows,
+                hip_atom_spans=spans,
+                hip_training_rows=np.flatnonzero(
+                    ~validation_mask(values["omol_index"])
+                ).tolist(),
+                hip_data_sha256=meta["sha256"],
+                hip_feature_start=offset,
+                hip_feature_end=offset + length,
+            )
+        )
+        offset += length
+        if features is not None:
+            cached.append(np.concatenate([features[a:b] for a, b in spans]))
+    tensor_fields = (
+        "pos",
+        "atomic_numbers",
+        "cell",
+        "pbc",
+        "natoms",
+        "nedges",
+        "charge",
+        "spin",
+        "fixed",
+        "tags",
+        "hessian",
+    )
+    combined = {key: torch.cat([part[key] for part in chunks]) for key in tensor_fields}
+    count = len(combined["natoms"])
+    data = AtomicData(
+        **combined,
+        edge_index=torch.empty(2, 0, dtype=torch.long),
+        cell_offsets=torch.empty(0, 3),
+        batch=torch.arange(count).repeat_interleave(combined["natoms"]),
+        dataset=["omol"] * count,
+        sid=[sid for part in chunks for sid in part.sid],
+    )
+    data.hip_cache_groups = groups
+    if len(cached) == len(chunks):
+        data.hip_features = torch.from_numpy(np.concatenate(cached))
+    return data
 
 
 class HessianStream(IterableDataset):
@@ -83,8 +195,11 @@ class HessianStream(IterableDataset):
         rank=0,
         world=1,
         seed=7,
-        pair_budget=8192,
-        max_batch=32,
+        pair_budget=131072,
+        max_batch=64,
+        max_atoms=2560,
+        window_shards=8,
+        microbatch_pairs=None,
         split="train",
         max_passes=None,
         feature_cache=None,
@@ -94,6 +209,8 @@ class HessianStream(IterableDataset):
         self.root = Path(root)
         self.rank, self.world, self.seed = rank, world, seed
         self.pair_budget, self.max_batch = pair_budget, max_batch
+        self.max_atoms, self.window_shards = max_atoms, window_shards
+        self.microbatch_pairs = microbatch_pairs
         self.split, self.max_passes = split, max_passes
         self.feature_cache = feature_cache
         self.markers = markers
@@ -114,7 +231,8 @@ class HessianStream(IterableDataset):
             rng = random.Random(self.seed + pass_id)
             rng.shuffle(markers)
             mine = markers[self.rank :: self.world][wid::workers]
-            for marker in mine:
+            window = []
+            for marker_index, marker in enumerate(mine):
                 row = json.loads(marker.read_text())
                 path = self.root / row["path"]
                 with h5py.File(path, "r") as f:
@@ -145,37 +263,49 @@ class HessianStream(IterableDataset):
                     np.r_[0, np.cumsum(9 * sizes.astype(np.int64) ** 2)],
                 ):
                     raise ValueError("Hessian pointers differ from dense sample sizes")
-                mask = validation_mask(values["omol_index"])
-                rows = np.flatnonzero(mask if self.split == "val" else ~mask)
                 key = str(Path(row["path"]).with_suffix(""))
                 features = (
                     cached_features(self.feature_cache, key, row["sha256"])
                     if self.feature_cache and self.split == "train"
                     else None
                 )
-                groups = np.unique(sizes[rows]).tolist()
-                rng.shuffle(groups)
-                for n in groups:
-                    selected = rows[sizes[rows] == n]
-                    rng.shuffle(selected)
-                    batch_size = min(
-                        self.max_batch, max(1, self.pair_budget // (n * n))
+                window.append((values, row, features))
+                if len(window) < self.window_shards and marker_index + 1 < len(mine):
+                    continue
+                references = []
+                sizes_window = []
+                for source, (v, _, _) in enumerate(window):
+                    held_out = validation_mask(v["omol_index"])
+                    eligible = np.flatnonzero(
+                        held_out if self.split == "val" else ~held_out
+                    ).tolist()
+                    rng.shuffle(eligible)
+                    references.extend((source, r) for r in eligible)
+                    sizes_window.extend(int(v["natoms"][r]) for r in eligible)
+                batches = list(
+                    BalancedBatchSampler(
+                        sizes_window,
+                        max_atoms=self.max_atoms,
+                        batch_size=self.max_batch,
+                        pair_budget=self.pair_budget,
                     )
-                    for start in range(0, len(selected), batch_size):
-                        chosen = selected[start : start + batch_size]
-                        data = make_batch(values, chosen)
-                        ptr = values["atom_ptr"]
-                        spans = [(int(ptr[r]), int(ptr[r + 1])) for r in chosen]
-                        if features is not None:
-                            data.hip_features = torch.from_numpy(
-                                np.concatenate([features[a:b] for a, b in spans])
-                            )
-                        data.hip_cache_key = key
-                        data.hip_total_atoms = int(ptr[-1])
-                        data.hip_row_count = len(sizes)
-                        data.hip_rows = chosen.tolist()
-                        data.hip_atom_spans = spans
-                        data.hip_training_rows = np.flatnonzero(~mask).tolist()
-                        data.hip_data_sha256 = row["sha256"]
-                        yield data
+                )
+                rng.shuffle(batches)
+                for batch in batches:
+                    fragments = (
+                        microbatch_indices(batch, sizes_window, self.microbatch_pairs)
+                        if self.microbatch_pairs
+                        else [batch]
+                    )
+                    packed = []
+                    for fragment in fragments:
+                        by_source = {}
+                        for index in fragment:
+                            source, r = references[index]
+                            by_source.setdefault(source, []).append(r)
+                        packed.append(
+                            pack_window_batch(window, list(by_source.items()))
+                        )
+                    yield packed if self.microbatch_pairs else packed[0]
+                window = []
             pass_id += 1

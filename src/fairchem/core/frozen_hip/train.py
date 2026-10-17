@@ -16,6 +16,7 @@ import math
 import os
 import signal
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -26,6 +27,7 @@ from torch.utils.data import DataLoader
 from fairchem.core.frozen_hip.cache import FeatureCacheWriter
 from fairchem.core.frozen_hip.data import HessianStream
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
+from fairchem.core.frozen_hip.precision import configure_head_precision
 
 
 def parse_args():
@@ -36,8 +38,28 @@ def parse_args():
     p.add_argument("--duration", type=float, default=13200)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--workers", type=int, default=2)
-    p.add_argument("--pair-budget", type=int, default=8192)
-    p.add_argument("--max-batch", type=int, default=32)
+    p.add_argument(
+        "--pair-budget",
+        type=int,
+        default=1000000000,
+        help="Optional per-rank pair limit for the optimizer batch",
+    )
+    p.add_argument(
+        "--microbatch-pairs",
+        type=int,
+        default=196608,
+        help="Per-GPU quadratic work limit before gradient accumulation",
+    )
+    p.add_argument(
+        "--max-batch", type=int, default=64, help="Global molecule cap across all ranks"
+    )
+    p.add_argument(
+        "--max-atoms",
+        type=int,
+        default=2560,
+        help="Global target atom budget across all ranks",
+    )
+    p.add_argument("--window-shards", type=int, default=8)
     p.add_argument("--layers", type=int, default=1)
     p.add_argument("--checkpoint-every", type=int, default=500)
     p.add_argument("--validate-every", type=int, default=1000)
@@ -45,7 +67,9 @@ def parse_args():
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--execution-mode", choices=("general",), default="general")
-    p.add_argument("--head-precision", choices=("fp32", "bf16"), default="fp32")
+    p.add_argument(
+        "--head-precision", choices=("fp32", "bf16", "bf16-mlp"), default="fp32"
+    )
     p.add_argument("--checkpoint-edges", type=int, default=20000)
     p.add_argument("--benchmark", action="store_true")
     p.add_argument("--resume", type=Path)
@@ -62,6 +86,12 @@ def main():
     rank = int(os.environ.get("RANK", 0))
     world = int(os.environ.get("WORLD_SIZE", 1))
     local = int(os.environ.get("LOCAL_RANK", 0))
+    if args.microbatch_pairs < 1 or args.window_shards < 1:
+        raise ValueError("Microbatch and shard-window limits must be positive")
+    if args.max_batch < world or args.max_atoms < world:
+        raise ValueError("Global batch limits must allow at least one item per rank")
+    if args.max_batch % world or args.max_atoms % world:
+        raise ValueError("Global batch limits must be divisible by the rank count")
     torch.cuda.set_device(local)
     device = torch.device("cuda", local)
     if world > 1:
@@ -87,7 +117,11 @@ def main():
     )
     cache_writer = FeatureCacheWriter(cache_root) if cache_root else None
     head = model.head
+    configure_head_precision(head, args.head_precision)
     if args.compile_head:
+        # The small head fits one gradient bucket. Avoid DDP graph splitting,
+        # whose symbolic reshape handling fails for variable molecular graphs.
+        torch._dynamo.config.optimize_ddp = False
         torch._dynamo.config.recompile_limit = 16
         for block in head.blocks:
             block.compile(dynamic=True)
@@ -136,8 +170,13 @@ def main():
             rank=rank,
             world=world,
             seed=args.seed if split == "val" else args.seed + step,
-            pair_budget=args.pair_budget,
-            max_batch=args.max_batch,
+            pair_budget=(
+                args.pair_budget if split == "train" else args.microbatch_pairs
+            ),
+            microbatch_pairs=args.microbatch_pairs if split == "train" else None,
+            max_batch=args.max_batch // world,
+            max_atoms=args.max_atoms // world,
+            window_shards=args.window_shards,
             split=split,
             max_passes=1 if split == "val" else None,
             feature_cache=cache_root,
@@ -221,6 +260,10 @@ def main():
             "seed": args.seed,
             "world_size": world,
             "loss": "structure_mean_mse_eV2_Angstrom4",
+            "global_batch_cap": args.max_batch,
+            "global_atom_target": args.max_atoms,
+            "sampler": "windowed_best_fit_atoms",
+            "microbatch_pairs": args.microbatch_pairs,
         }
         temporary = args.output / "checkpoint.tmp"
         torch.save(checkpoint, temporary)
@@ -262,17 +305,39 @@ def main():
                 dist.all_reduce(stop, op=dist.ReduceOp.MAX)
             if stop.item():
                 break
-            data = move(next(train_iter))
-            b = len(data.hip_sizes)
-            optimizer.zero_grad(set_to_none=True)
-            prediction = predict(data)
-            loss = structure_mse(prediction, data.hessian, data.hip_sizes)
-            # Ranks can carry different molecule counts because their atom counts
-            # differ. Match the exact global per-molecule mean under DDP averaging.
-            count = torch.tensor(b, device=device, dtype=torch.float32)
+            host_batches = next(train_iter)
+            local_count = sum(len(data.natoms) for data in host_batches)
+            count = torch.tensor(local_count, device=device, dtype=torch.float32)
             if world > 1:
                 dist.all_reduce(count)
-            (loss * (b * world / count)).backward()
+            optimizer.zero_grad(set_to_none=True)
+            batch_metrics = torch.zeros_like(metrics)
+            for micro_index, host_data in enumerate(host_batches):
+                data = move(host_data)
+                b = len(data.hip_sizes)
+                # Only the last microbatch synchronizes gradients. Every molecule
+                # keeps its weight in the same global optimizer batch.
+                context = (
+                    model.head.no_sync()
+                    if world > 1 and micro_index + 1 < len(host_batches)
+                    else nullcontext()
+                )
+                with context:
+                    prediction = predict(data)
+                    loss = structure_mse(prediction, data.hessian, data.hip_sizes)
+                    (loss * (b * world / count)).backward()
+                batch_metrics += torch.stack(
+                    (
+                        loss.detach().double() * b,
+                        count.new_tensor(b).double(),
+                        count.new_tensor(sum(data.hip_sizes)).double(),
+                        count.new_tensor(
+                            b if hasattr(data, "hip_features") else 0
+                        ).double(),
+                    )
+                )
+                host_batches[micro_index] = None
+                del prediction, loss, data, host_data
             torch.nn.utils.clip_grad_norm_(
                 head.parameters(), max_norm=10.0, error_if_nonfinite=True
             )
@@ -283,17 +348,8 @@ def main():
                 group["lr"] = lr
             optimizer.step()
             step += 1
-            total_samples += b
-            metrics += torch.stack(
-                (
-                    loss.detach().double() * b,
-                    count.new_tensor(b).double(),
-                    count.new_tensor(sum(data.hip_sizes)).double(),
-                    count.new_tensor(
-                        b if hasattr(data, "hip_features") else 0
-                    ).double(),
-                )
-            )
+            total_samples += local_count
+            metrics += batch_metrics
             if step % args.log_every == 0:
                 torch.cuda.synchronize()
                 if world > 1:
@@ -303,6 +359,8 @@ def main():
                 if rank == 0:
                     row = {
                         "event": "train",
+                        "mean_global_batch": values[1] / args.log_every,
+                        "mean_global_atoms": values[2] / args.log_every,
                         "step": step,
                         "mse": values[0] / values[1],
                         "samples_s": values[1] / elapsed,
@@ -328,13 +386,16 @@ def main():
                         if i >= args.validation_batches:
                             break
                         data = move(host_data)
-                        error = (predict(data).float() - data.hessian).reshape(
-                            len(data.hip_sizes), -1
-                        )
+                        error = predict(data).float().reshape(-1) - data.hessian
+                        parts = error.split([9 * n * n for n in data.hip_sizes])
                         val += torch.stack(
                             (
-                                error.square().mean(1).sum(),
-                                error.abs().mean(1).sum(),
+                                torch.stack(
+                                    [part.square().mean() for part in parts]
+                                ).sum(),
+                                torch.stack(
+                                    [part.abs().mean() for part in parts]
+                                ).sum(),
                                 error.new_tensor(len(data.hip_sizes)),
                             )
                         ).double()

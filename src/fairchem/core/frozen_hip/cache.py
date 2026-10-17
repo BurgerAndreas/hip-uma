@@ -40,25 +40,32 @@ class FeatureCacheWriter:
     Validation features are always recomputed and never read from this cache.
     """
 
-    def __init__(self, root, max_bytes=512 << 20):
+    def __init__(self, root, max_bytes=2048 << 20):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.max_bytes = max_bytes
         self.active = OrderedDict()
 
     def store(self, data, features):
+        host = features.detach().float().cpu().numpy()
+        if hasattr(data, "hip_cache_groups"):
+            for group in data.hip_cache_groups:
+                self._store(
+                    group, host[group.hip_feature_start : group.hip_feature_end]
+                )
+        else:
+            self._store(data, host)
+
+    def _store(self, data, host):
         key = data.hip_cache_key
         if (self.root / f"{key}.json").exists():
             return
         if key not in self.active:
-            array = np.zeros(
-                (data.hip_total_atoms, *features.shape[1:]), dtype=np.float32
-            )
+            array = np.zeros((data.hip_total_atoms, *host.shape[1:]), dtype=np.float32)
             seen = np.zeros(data.hip_row_count, dtype=bool)
             self.active[key] = (array, seen)
         self.active.move_to_end(key)
         array, seen = self.active[key]
-        host = features.detach().float().cpu().numpy()
         start = 0
         for row, (first, last) in zip(data.hip_rows, data.hip_atom_spans, strict=True):
             array[first:last] = host[start : start + last - first]
