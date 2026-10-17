@@ -845,10 +845,23 @@ def main():
         # Stop the infinite loader before interpreter and CUDA teardown. Held-out
         # evaluation is bounded and uses the main process rather than abandoned
         # multiprocessing prefetch queues.
-        if (args.workers or args.device_prefetch) and train_iter is not None:
-            train_iter._shutdown_workers()
         if not args.benchmark and not args.eval_only:
             save()
+        if (args.workers or args.device_prefetch) and train_iter is not None:
+            try:
+                train_iter._shutdown_workers()
+            except RuntimeError as error:
+                # Workers can abort while discarding queued tensor transfers.
+                # Only tolerate that failure after intentional loader shutdown.
+                # Exceptions raised during training still propagate normally.
+                if "DataLoader worker" not in str(error):
+                    raise
+                print(
+                    json.dumps(
+                        {"event": "loader_shutdown_warning", "error": str(error)}
+                    ),
+                    flush=True,
+                )
         if cache_writer is not None:
             cache_writer.close()
     # Allocation timeouts only checkpoint. Final evaluation happens at the
