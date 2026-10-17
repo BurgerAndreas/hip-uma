@@ -248,3 +248,19 @@ This includes:
 - Gotchas that are not obvious
 - Subtle bugs that manifest under specific conditions
 - Repeat corrections I make to the output of coding agents
+
+
+## Frozen HIP training notes
+
+- Keep the frozen UMA body and trainable HIP head backends separate. The merged
+  inference backend can change composition-dependent expert routing.
+- Compare cached-feature speed with cached-feature speed. Report the feature
+  preparation cost separately from update throughput.
+- Full-head FP16 can produce nonfinite gradients. The tested fast mode uses
+  FP16 only for frozen inference and keeps the head and targets in FP32.
+- A symmetric Hessian predictor needs the antisymmetric target MSE constant
+  when compact labels preserve the original dense loss.
+- Final evaluation reloads the last checkpoint and checks the fixed sample hash.
+  Do not select the best checkpoint or use batch-limited evaluation.
+- Avoid DDP compiler graph splitting for the dynamic HIP head. Its symbolic
+  graph reshapes need the normal compiler path.
