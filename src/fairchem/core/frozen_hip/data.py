@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import random
+from bisect import bisect_left, insort
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,10 +34,9 @@ def make_batch(values, rows, *, include_hessian=True):
     """Pack ragged molecules directly, without per-molecule ASE objects."""
     sizes = values["natoms"][rows].astype(np.int64)
     b = len(rows)
-    ptr = values.get("atom_ptr", np.r_[0, np.cumsum(values["natoms"])])
-    hp = values.get(
-        "hessian_ptr", np.r_[0, np.cumsum(9 * values["natoms"].astype(np.int64) ** 2)]
-    )
+    ptr = values.get("atom_ptr")
+    if ptr is None:
+        ptr = np.r_[0, np.cumsum(values["natoms"])]
     numbers = np.concatenate(
         [values["atomic_numbers"][ptr[r] : ptr[r + 1]] for r in rows]
     )
@@ -47,15 +47,14 @@ def make_batch(values, rows, *, include_hessian=True):
         low = xyz.min(axis=0)
         cells[i, np.arange(3), np.arange(3)] = xyz.max(axis=0) - low + 240.0
         positions.append((xyz - low + 120.0).astype(np.float32))
-    labels = (
-        torch.from_numpy(
-            np.concatenate(
-                [values["hessian_flat"][hp[r] : hp[r + 1]] for r in rows]
-            ).copy()
+    labels = None
+    if include_hessian:
+        hp = values.get("hessian_ptr")
+        if hp is None:
+            hp = np.r_[0, np.cumsum(9 * values["natoms"].astype(np.int64) ** 2)]
+        labels = torch.from_numpy(
+            np.concatenate([values["hessian_flat"][hp[r] : hp[r + 1]] for r in rows])
         )
-        if include_hessian
-        else None
-    )
     return AtomicData(
         pos=torch.from_numpy(np.concatenate(positions)),
         atomic_numbers=torch.from_numpy(numbers.astype(np.int64)),
@@ -95,24 +94,34 @@ class BalancedBatchSampler:
 
     def __iter__(self):
         batches, atoms, pairs = [], [], []
+        available = []
         for row in np.argsort(-self.sizes, kind="stable"):
             n = int(self.sizes[row])
-            feasible = [
-                i
-                for i, batch in enumerate(batches)
-                if len(batch) < self.batch_size
-                and atoms[i] + n <= self.max_atoms
-                and pairs[i] + n * n <= self.pair_budget
-            ]
-            if feasible:
-                i = max(feasible, key=lambda i: atoms[i])
+            # Increasing free atom capacity gives the same best-fit order.
+            # The batch index resolves ties exactly as the original scan did.
+            position = bisect_left(available, (n, -1))
+            while position < len(available):
+                _, i = available[position]
+                if pairs[i] + n * n <= self.pair_budget:
+                    break
+                position += 1
+            if position < len(available):
+                _, i = available.pop(position)
                 batches[i].append(int(row))
                 atoms[i] += n
                 pairs[i] += n * n
             else:
+                i = len(batches)
                 batches.append([int(row)])
                 atoms.append(n)
                 pairs.append(n * n)
+            remaining = self.max_atoms - atoms[i]
+            if (
+                len(batches[i]) < self.batch_size
+                and remaining > 0
+                and pairs[i] < self.pair_budget
+            ):
+                insort(available, (remaining, i))
         yield from batches
 
 

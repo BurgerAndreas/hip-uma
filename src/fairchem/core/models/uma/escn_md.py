@@ -1299,9 +1299,17 @@ class Hessian_Head(nn.Module, HeadInterface):
             assembly_indices=not hasattr(data, "hip_pair_targets"),
         )
 
-        wigner, wigner_inv = self.backbone._get_rotmat_and_wigner(
-            data.edge_distance_vec_hessian
-        )
+        fused_wigner = getattr(self, "fused_wigner", False)
+        if fused_wigner:
+            from fairchem.core.frozen_hip.wigner import frozen_wigner
+
+            wigner, wigner_inv = frozen_wigner(
+                self, data.edge_distance_vec_hessian, data.edge_distance_hessian
+            )
+        else:
+            wigner, wigner_inv = self.backbone._get_rotmat_and_wigner(
+                data.edge_distance_vec_hessian
+            )
         coefficient_index = (
             self.backbone.coefficient_index
             if self.backbone.mmax != self.backbone.lmax
@@ -1314,8 +1322,9 @@ class Hessian_Head(nn.Module, HeadInterface):
             coefficient_index,
         )
 
-        dist_scaled = data.edge_distance_hessian / self.cutoff_hessian
-        edge_envelope = self.backbone.envelope(dist_scaled).reshape(-1, 1, 1)
+        if not fused_wigner:
+            dist_scaled = data.edge_distance_hessian / self.cutoff_hessian
+            edge_envelope = self.backbone.envelope(dist_scaled).reshape(-1, 1, 1)
         edge_distance_embedding = self.distance_expansion_hessian(
             data.edge_distance_hessian
         )
@@ -1330,7 +1339,7 @@ class Hessian_Head(nn.Module, HeadInterface):
             (edge_distance_embedding, source_embedding, target_embedding),
             dim=1,
         )
-        wigner_inv_envelope = wigner_inv * edge_envelope
+        wigner_inv_envelope = wigner_inv if fused_wigner else wigner_inv * edge_envelope
         return x_edge, wigner, wigner_inv_envelope
 
     def projected_edge_irreps(
@@ -1347,11 +1356,12 @@ class Hessian_Head(nn.Module, HeadInterface):
             raise NotImplementedError("Hessian_Head does not support graph parallelism")
 
         x_edge, wigner, wigner_inv_envelope = self._hessian_edge_features(data, emb)
-        self.backbone.set_MOLE_sizes(
-            nsystems=data.natoms.numel(),
-            batch_full=data.get("batch_full", data.batch),
-            edge_index=data.edge_index_hessian,
-        )
+        if getattr(self, "requires_mole_routing", True):
+            self.backbone.set_MOLE_sizes(
+                nsystems=data.natoms.numel(),
+                batch_full=data.get("batch_full", data.batch),
+                edge_index=data.edge_index_hessian,
+            )
         node_embedding = emb["node_embedding"].clone()
         for layer_idx, block in enumerate(self.blocks):
             with record_function(f"hessian message passing {layer_idx}"):

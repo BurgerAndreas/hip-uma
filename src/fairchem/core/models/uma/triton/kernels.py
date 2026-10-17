@@ -1229,6 +1229,9 @@ def permute_wigner_inv_edge_to_node_kernel(
     BLOCK_C: tl.constexpr,
     GRID_E_STRIDE: tl.constexpr,
     SAVE_INPUT: tl.constexpr = True,
+    EI_ptr=None,
+    SCATTER: tl.constexpr = False,
+    NODE_OFFSET: tl.constexpr = 0,
 ):
     """
     Forward: M→L permutation + block-diagonal Wigner^{-1} rotation.
@@ -1251,6 +1254,9 @@ def permute_wigner_inv_edge_to_node_kernel(
         w_base = edge_id * 81
         x_base = edge_id * 9 * sphere_channels
         out_base = edge_id * 9 * sphere_channels
+        if SCATTER:
+            target = tl.load(EI_ptr + num_edges + edge_id) - NODE_OFFSET
+            out_base = target * 9 * sphere_channels
 
         # Load from M-major positions using M_TO_L_GATHER_IDX = [0, 5, 1, 3, 8, 6, 2, 4, 7]
         # x_l[i] = x_m[M_TO_L_GATHER_IDX[i]]
@@ -1351,15 +1357,89 @@ def permute_wigner_inv_edge_to_node_kernel(
         y8 = w84 * x4 + w85 * x5 + w86 * x6 + w87 * x7 + w88 * x8
 
         # Store in L-major order (sequential)
-        tl.store(OUT_ptr + out_base + 0 * sphere_channels + c_range, y0, mask=c_mask)
-        tl.store(OUT_ptr + out_base + 1 * sphere_channels + c_range, y1, mask=c_mask)
-        tl.store(OUT_ptr + out_base + 2 * sphere_channels + c_range, y2, mask=c_mask)
-        tl.store(OUT_ptr + out_base + 3 * sphere_channels + c_range, y3, mask=c_mask)
-        tl.store(OUT_ptr + out_base + 4 * sphere_channels + c_range, y4, mask=c_mask)
-        tl.store(OUT_ptr + out_base + 5 * sphere_channels + c_range, y5, mask=c_mask)
-        tl.store(OUT_ptr + out_base + 6 * sphere_channels + c_range, y6, mask=c_mask)
-        tl.store(OUT_ptr + out_base + 7 * sphere_channels + c_range, y7, mask=c_mask)
-        tl.store(OUT_ptr + out_base + 8 * sphere_channels + c_range, y8, mask=c_mask)
+        if SCATTER:
+            tl.atomic_add(
+                OUT_ptr + out_base + 0 * sphere_channels + c_range,
+                y0,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                OUT_ptr + out_base + 1 * sphere_channels + c_range,
+                y1,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                OUT_ptr + out_base + 2 * sphere_channels + c_range,
+                y2,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                OUT_ptr + out_base + 3 * sphere_channels + c_range,
+                y3,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                OUT_ptr + out_base + 4 * sphere_channels + c_range,
+                y4,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                OUT_ptr + out_base + 5 * sphere_channels + c_range,
+                y5,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                OUT_ptr + out_base + 6 * sphere_channels + c_range,
+                y6,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                OUT_ptr + out_base + 7 * sphere_channels + c_range,
+                y7,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                OUT_ptr + out_base + 8 * sphere_channels + c_range,
+                y8,
+                mask=c_mask,
+                sem="relaxed",
+            )
+        else:
+            tl.store(
+                OUT_ptr + out_base + 0 * sphere_channels + c_range, y0, mask=c_mask
+            )
+            tl.store(
+                OUT_ptr + out_base + 1 * sphere_channels + c_range, y1, mask=c_mask
+            )
+            tl.store(
+                OUT_ptr + out_base + 2 * sphere_channels + c_range, y2, mask=c_mask
+            )
+            tl.store(
+                OUT_ptr + out_base + 3 * sphere_channels + c_range, y3, mask=c_mask
+            )
+            tl.store(
+                OUT_ptr + out_base + 4 * sphere_channels + c_range, y4, mask=c_mask
+            )
+            tl.store(
+                OUT_ptr + out_base + 5 * sphere_channels + c_range, y5, mask=c_mask
+            )
+            tl.store(
+                OUT_ptr + out_base + 6 * sphere_channels + c_range, y6, mask=c_mask
+            )
+            tl.store(
+                OUT_ptr + out_base + 7 * sphere_channels + c_range, y7, mask=c_mask
+            )
+            tl.store(
+                OUT_ptr + out_base + 8 * sphere_channels + c_range, y8, mask=c_mask
+            )
         edge_id += GRID_E_STRIDE
 
 
@@ -1378,6 +1458,9 @@ def permute_wigner_inv_edge_to_node_bwd_dx_kernel(
     sphere_channels,
     BLOCK_C: tl.constexpr,
     GRID_E_STRIDE: tl.constexpr,
+    EI_ptr=None,
+    GATHER: tl.constexpr = False,
+    NODE_OFFSET: tl.constexpr = 0,
 ):
     """
     Backward w.r.t. input x: W^T @ dy + L→M permutation.
@@ -1397,6 +1480,9 @@ def permute_wigner_inv_edge_to_node_bwd_dx_kernel(
     while edge_id < num_edges:
         w_base = edge_id * 81
         dy_base = edge_id * 9 * sphere_channels
+        if GATHER:
+            target = tl.load(EI_ptr + num_edges + edge_id) - NODE_OFFSET
+            dy_base = target * 9 * sphere_channels
         dx_base = edge_id * 9 * sphere_channels
 
         # Load dy in L-major order (sequential reads)

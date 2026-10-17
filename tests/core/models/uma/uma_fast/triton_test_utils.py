@@ -8,8 +8,7 @@ Test-only Triton kernel launchers.
 
 These launchers directly invoke Triton kernels (bypassing @triton_op wrappers)
 and use num_edges as GRID_E_STRIDE for simpler testing. Production code uses
-the autograd Functions in the triton/ package which use fixed GRID_E_STRIDE=2048
-for torch.compile compatibility.
+the autograd Functions in the triton/ package which use a bounded production stride for torch.compile compatibility.
 
 These should NOT be used in production - only for unit testing kernel correctness.
 """
@@ -18,7 +17,7 @@ from __future__ import annotations
 
 import torch
 
-from fairchem.core.models.uma.triton.constants import BLOCK_C, M_TO_L_GATHER_IDX
+from fairchem.core.models.uma.triton.constants import BLOCK_C
 from fairchem.core.models.uma.triton.kernels import (
     node_to_edge_wigner_permute_kernel,
     permute_wigner_inv_edge_to_node_kernel,
@@ -33,7 +32,7 @@ def node_to_edge_wigner_permute_launcher(
     """
     Test-only launcher: gather + Wigner + L→M permute.
 
-    Uses num_edges as GRID_E_STRIDE (not the production constant 2048).
+    Uses num_edges as GRID_E_STRIDE (not the bounded production stride).
     For testing kernel correctness, not for production use.
 
     Args:
@@ -110,7 +109,7 @@ def permute_wigner_inv_edge_to_node_launcher(
     """
     Test-only launcher: M→L permute + Wigner inverse.
 
-    Uses E as GRID_E_STRIDE (not the production constant 2048).
+    Uses E as GRID_E_STRIDE (not the bounded production stride).
     For testing kernel correctness, not for production use.
 
     Args:

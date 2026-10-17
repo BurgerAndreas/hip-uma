@@ -17,6 +17,7 @@ from torch.utils.checkpoint import checkpoint
 
 from fairchem.core.calculate import pretrained_mlip
 from fairchem.core.models.uma.escn_md import Hessian_Head
+from fairchem.core.models.uma.nn.mole import MOLE
 from fairchem.core.units.mlip_unit import InferenceSettings
 
 
@@ -58,6 +59,11 @@ class FrozenHIP(nn.Module):
         self.backbone.regress_config.stress = False
         self.backbone.regress_config.hessian = False
         self.head = Hessian_Head(self.backbone, num_layers_hessian=layers).to(device)
+        # Dense HIP layers do not consume the backbone's expert routing sizes.
+        # Avoid copying those sizes to the host after each complete HIP graph.
+        self.head.requires_mole_routing = any(
+            isinstance(module, MOLE) for module in self.head.modules()
+        )
         self.checkpoint_edges = checkpoint_edges
 
     def train(self, mode=True):

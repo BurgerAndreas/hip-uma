@@ -26,9 +26,14 @@ from torch.utils.data import DataLoader
 
 from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter, feature_namespace
 from fairchem.core.frozen_hip.data import HessianStream
-from fairchem.core.frozen_hip.losses import structure_block_rmse
+from fairchem.core.frozen_hip.losses import structure_block_rmse, structure_mae
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
-from fairchem.core.frozen_hip.packed import PackedHessianStream, block_mse, block_rmse
+from fairchem.core.frozen_hip.packed import (
+    PackedHessianStream,
+    block_mae,
+    block_mse,
+    block_rmse,
+)
 from fairchem.core.frozen_hip.precision import configure_head_precision
 from fairchem.core.frozen_hip.rotations import enable_fused_rotations
 from fairchem.core.frozen_hip.validation import (
@@ -46,10 +51,12 @@ def parse_args():
     p.add_argument("--steps", type=int, default=200000)
     p.add_argument("--duration", type=float, default=13200)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--loss", choices=("mse", "block-rmse"), default="mse")
+    p.add_argument("--loss", choices=("mse", "mae", "block-rmse"), default="mse")
     p.add_argument("--profile-steps", type=int, default=0)
     p.add_argument("--profile-after", type=int, default=100)
     p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--prefetch-factor", type=int, default=8)
+    p.add_argument("--device-prefetch", action="store_true")
     p.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
         "--pair-budget",
@@ -80,6 +87,7 @@ def parse_args():
     p.add_argument("--eval-only", action="store_true")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--code-revision")
     p.add_argument("--execution-mode", choices=("general",), default="general")
     p.add_argument(
         "--head-precision", choices=("fp32", "bf16", "bf16-mlp"), default="fp32"
@@ -104,9 +112,31 @@ def parse_args():
     p.add_argument("--backbone-graph-version", type=int, choices=(1, 2, 4), default=2)
     p.add_argument("--tf32", action="store_true")
     p.add_argument("--compile-head", action="store_true")
+    p.add_argument("--scaled-linear", action="store_true")
+    p.add_argument("--fused-scatter", action="store_true")
+    p.add_argument("--fused-wigner", action="store_true")
+    p.add_argument("--fused-radial", action="store_true")
+    p.add_argument("--segmented-scatter", action="store_true")
+    p.add_argument("--async-grad-check", action="store_true")
     p.add_argument("--stop-file", type=Path)
     p.add_argument("--refresh-data-every", type=int, default=2000)
     args = p.parse_args()
+    if args.prefetch_factor < 1:
+        p.error("Prefetch count must be positive")
+    if args.segmented_scatter:
+        args.fused_scatter = True
+    if args.scaled_linear and args.head_precision != "fp32":
+        p.error("Scaled linear operations require FP32 head precision")
+    if args.fused_wigner and not args.fused_rotations:
+        p.error("Fused Wigner geometry requires fused rotations")
+    if args.fused_scatter and not args.fused_rotations:
+        p.error("Fused scatter requires fused rotations")
+    if args.fused_radial and (
+        not args.fused_rotations or args.head_precision != "fp32"
+    ):
+        p.error(
+            "Fused radial operations require fused rotations and FP32 head precision"
+        )
     if args.checkpoint_edges is None:
         args.checkpoint_edges = args.microbatch_pairs + 1
     return args
@@ -135,6 +165,11 @@ def main():
             ("projected_readout", False),
             ("fused_rotations", False),
             ("fused_backbone", False),
+            ("scaled_linear", False),
+            ("fused_scatter", False),
+            ("fused_wigner", False),
+            ("fused_radial", False),
+            ("segmented_scatter", False),
         ):
             setattr(
                 args,
@@ -206,6 +241,22 @@ def main():
         from fairchem.core.frozen_hip.readout import enable_projected_readout
 
         enable_projected_readout(model.head)
+    if args.fused_wigner:
+        from fairchem.core.frozen_hip.wigner import enable_fused_wigner
+
+        enable_fused_wigner(model.head)
+    if args.fused_scatter:
+        from fairchem.core.frozen_hip.rotations import enable_fused_scatter
+
+        enable_fused_scatter(model.head, segmented=args.segmented_scatter)
+    if args.scaled_linear:
+        from fairchem.core.frozen_hip.linear import enable_scaled_linear
+
+        enable_scaled_linear(model.head)
+    if args.fused_radial:
+        from fairchem.core.frozen_hip.radial import enable_fused_radial
+
+        enable_fused_radial(model.head)
     head = model.head
     configure_head_precision(head, args.head_precision)
     if args.compile_head:
@@ -226,6 +277,7 @@ def main():
     optimizer = torch.optim.AdamW(
         head.parameters(), lr=args.lr, weight_decay=1e-4, fused=True
     )
+    initial_head_hash = parameter_hash(head)
     step = 0
     resume = (
         args.output / "latest.pt"
@@ -253,6 +305,13 @@ def main():
                 "Checkpoint loss differs; use a separate output for a new loss"
             )
         head.load_state_dict(state["head"])
+        initial_head_hash = state.get("initial_head_sha256")
+        if (
+            not args.eval_only
+            and not args.benchmark
+            and state.get("target_steps") not in (None, args.steps)
+        ):
+            raise ValueError("Checkpoint step target differs from this experiment")
         if not args.eval_only:
             optimizer.load_state_dict(state["optimizer"])
         step = state["step"]
@@ -321,7 +380,7 @@ def main():
         kw = (
             {
                 "multiprocessing_context": "spawn",
-                "prefetch_factor": 2,
+                "prefetch_factor": args.prefetch_factor,
                 "persistent_workers": True,
             }
             if args.workers
@@ -378,21 +437,60 @@ def main():
     def move(data):
         sizes = data.natoms.tolist()
         pbc = data.pbc
-        # These boolean flags only control Python branches in graph generation.
-        data.apply(
-            lambda value: value if value is pbc else value.to(device, non_blocking=True)
-        )
+        if args.packed_data and hasattr(data, "hip_features"):
+            # Cached, complete HIP graphs need neither periodic cells nor CSD
+            # inputs. Keep unused bookkeeping off the device transfer stream.
+            for name in (
+                "pos",
+                "atomic_numbers",
+                "atomic_numbers_full",
+                "natoms",
+                "batch",
+                "batch_full",
+                "hip_features",
+                "hip_feature_scale",
+                "hip_atom_ptr",
+                "hip_edge_ptr",
+                "hip_pair_ptr",
+                "hip_pair_targets",
+                "hip_diagonal_targets",
+                "hip_asymmetry_mse",
+                "hessian",
+            ):
+                value = getattr(data, name, None)
+                if torch.is_tensor(value):
+                    setattr(data, name, value.to(device, non_blocking=True))
+        else:
+            # Boolean periodic flags control Python branches in graph generation.
+            data.apply(
+                lambda value: value
+                if value is pbc
+                else value.to(device, non_blocking=True)
+            )
         data.hip_sizes = sizes
         data.hip_fused_loss = args.fused_rotations
         return data
+
+    def device_iterator(source):
+        if not args.device_prefetch:
+            return source
+        from fairchem.core.frozen_hip.prefetch import DeviceBatchPrefetcher
+
+        return DeviceBatchPrefetcher(source, move, device)
+
+    if train_iter is not None:
+        train_iter = device_iterator(train_iter)
 
     def predict(data):
         # Frozen inference can use FP16; the head receives FP32 features.
         with phase("frozen_backbone"), torch.no_grad():
             if hasattr(data, "hip_features"):
+                features = data.hip_features.float()
+                scale = getattr(data, "hip_feature_scale", 1.0)
+                if not isinstance(scale, (float, int)) or scale != 1.0:
+                    features = features * scale
                 emb = {
-                    "node_embedding": data.hip_features.float()
-                    * getattr(data, "hip_feature_scale", 1.0),
+                    "node_embedding": features,
                     "batch": data.batch,
                 }
             else:
@@ -403,8 +501,11 @@ def main():
         from torch.utils.checkpoint import checkpoint
 
         def forward(x):
-            with phase("hip_head"), torch.autocast(
-                "cuda", dtype=torch.bfloat16, enabled=args.head_precision == "bf16"
+            with (
+                phase("hip_head"),
+                torch.autocast(
+                    "cuda", dtype=torch.bfloat16, enabled=args.head_precision == "bf16"
+                ),
             ):
                 module = model.head if model.training else head
                 result = module(data, {**emb, "node_embedding": x})
@@ -425,6 +526,9 @@ def main():
         assert all(p.grad is None for p in model.backbone.parameters())
         checkpoint = {
             "step": step,
+            "target_steps": args.steps,
+            "initial_head_sha256": initial_head_hash,
+            "code_revision": args.code_revision,
             "head": head.state_dict(),
             "optimizer": optimizer.state_dict(),
             "backbone": "uma-s-1p2",
@@ -442,6 +546,11 @@ def main():
             "block_so2": args.block_so2,
             "projected_readout": args.projected_readout,
             "fused_rotations": args.fused_rotations,
+            "fused_scatter": args.fused_scatter,
+            "fused_wigner": args.fused_wigner,
+            "fused_radial": args.fused_radial,
+            "segmented_scatter": args.segmented_scatter,
+            "scaled_linear": args.scaled_linear,
             "available_shards": len(inventory),
             "inventory_sha256": hashlib.sha256(
                 "\n".join(inventory).encode()
@@ -452,10 +561,12 @@ def main():
             "loss": (
                 "structure_mean_mse_eV2_Angstrom4"
                 if args.loss == "mse"
+                else "structure_mean_mae_symmetrized_eV_Angstrom2"
+                if args.loss == "mae"
                 else "structure_mean_block_rmse_symmetrized_eV_Angstrom2"
             ),
             "training_targets": "symmetrized"
-            if args.loss == "block-rmse"
+            if args.loss != "mse"
             else "dense_original_mse",
             "global_batch_cap": args.max_batch,
             "global_atom_target": args.max_atoms,
@@ -464,6 +575,7 @@ def main():
             "validation_sample_ids_sha256": cohort["sample_ids_sha256"],
             "validation_samples": cohort["samples"],
             "validate_every": args.validate_every,
+            "checkpoint_every": args.checkpoint_every,
         }
         temporary = args.output / "checkpoint.tmp"
         torch.save(checkpoint, temporary)
@@ -559,6 +671,7 @@ def main():
         public_config.update(
             backbone="uma-s-1p2",
             backbone_sha256=frozen_hash,
+            initial_head_sha256=initial_head_hash,
             head_parameters=sum(p.numel() for p in head.parameters()),
             world_size=world,
             validation="fixed_parent_holdout_cohort_v1",
@@ -599,7 +712,7 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             for micro_index, host_data in enumerate(host_batches):
                 with phase("device_transfer"):
-                    data = move(host_data)
+                    data = host_data if args.device_prefetch else move(host_data)
                 b = len(data.hip_sizes)
                 # Only the last microbatch synchronizes gradients. Every molecule
                 # keeps its weight in the same global optimizer batch.
@@ -612,20 +725,22 @@ def main():
                     prediction = predict(data)
                     with phase("hessian_loss"):
                         if hasattr(data, "hip_pair_targets"):
-                            loss_function = (
-                                block_mse if args.loss == "mse" else block_rmse
-                            )
+                            loss_function = {
+                                "mse": block_mse,
+                                "mae": block_mae,
+                                "block-rmse": block_rmse,
+                            }[args.loss]
                             loss = loss_function(
                                 prediction["edge_blocks"],
                                 prediction["node_blocks"],
                                 data,
                             )
                         else:
-                            loss_function = (
-                                structure_mse
-                                if args.loss == "mse"
-                                else structure_block_rmse
-                            )
+                            loss_function = {
+                                "mse": structure_mse,
+                                "mae": structure_mae,
+                                "block-rmse": structure_block_rmse,
+                            }[args.loss]
                             loss = loss_function(
                                 prediction, data.hessian, data.hip_sizes
                             )
@@ -640,9 +755,13 @@ def main():
                 host_batches[micro_index] = None
                 del prediction, loss, data, host_data
             with phase("grad_clip"):
-                torch.nn.utils.clip_grad_norm_(
-                    head.parameters(), max_norm=10.0, error_if_nonfinite=True
+                norm = torch.nn.utils.clip_grad_norm_(
+                    head.parameters(),
+                    max_norm=10.0,
+                    error_if_nonfinite=not args.async_grad_check,
                 )
+                if args.async_grad_check:
+                    torch._assert_async(torch.isfinite(norm), "Nonfinite HIP gradient")
             warmup = min(1.0, (step + 1) / 500)
             progress = max(0.0, (step - 500) / max(1, args.steps - 500))
             lr = args.lr * warmup * (0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2)
@@ -672,8 +791,7 @@ def main():
                         "mean_global_atoms": values[2] / args.log_every,
                         "step": step,
                         "loss_name": args.loss,
-                        ("mse" if args.loss == "mse" else "block_rmse"): values[0]
-                        / values[1],
+                        args.loss.replace("-", "_"): values[0] / values[1],
                         "samples_s": values[1] / elapsed,
                         "atoms_s": values[2] / elapsed,
                         "lr": lr,
@@ -705,7 +823,7 @@ def main():
                         train_iter._shutdown_workers()
                     inventory = updated
                     train_loader = loader()
-                    train_iter = iter(train_loader)
+                    train_iter = device_iterator(iter(train_loader))
                     if rank == 0:
                         print(
                             json.dumps(
@@ -723,7 +841,7 @@ def main():
         # Stop the infinite loader before interpreter and CUDA teardown. Held-out
         # evaluation is bounded and uses the main process rather than abandoned
         # multiprocessing prefetch queues.
-        if args.workers and train_iter is not None:
+        if (args.workers or args.device_prefetch) and train_iter is not None:
             train_iter._shutdown_workers()
         if not args.benchmark and not args.eval_only:
             save()
@@ -758,6 +876,18 @@ def main():
         from fairchem.core.frozen_hip.readout import enable_projected_readout
 
         enable_projected_readout(head, enabled=state.get("projected_readout", False))
+        from fairchem.core.frozen_hip.linear import enable_scaled_linear
+        from fairchem.core.frozen_hip.rotations import enable_fused_scatter
+
+        enable_scaled_linear(head, enabled=state.get("scaled_linear", False))
+        if state.get("fused_scatter", False):
+            enable_fused_scatter(head, segmented=state.get("segmented_scatter", False))
+        from fairchem.core.frozen_hip.wigner import enable_fused_wigner
+
+        enable_fused_wigner(head, enabled=state.get("fused_wigner", False))
+        from fairchem.core.frozen_hip.radial import enable_fused_radial
+
+        enable_fused_radial(head, enabled=state.get("fused_radial", False))
         evaluate(final=True)
     if rank == 0:
         assert parameter_hash(model.backbone) == frozen_hash

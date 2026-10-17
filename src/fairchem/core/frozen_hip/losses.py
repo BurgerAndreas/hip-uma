@@ -45,3 +45,18 @@ def structure_block_rmse(prediction, target, sizes):
         )
         values.append(block_rmse_values(error).mean())
     return torch.stack(values).mean()
+
+
+def structure_mae(prediction, target, sizes):
+    """Average entrywise absolute errors against symmetric labels per geometry."""
+    values = []
+    for p, t, n in zip(
+        prediction.split([9 * n * n for n in sizes]),
+        target.split([9 * n * n for n in sizes]),
+        sizes,
+        strict=True,
+    ):
+        matrix = t.float().reshape(3 * n, 3 * n)
+        symmetric = (matrix + matrix.T) * 0.5
+        values.append((p.float().reshape_as(symmetric) - symmetric).abs().mean())
+    return torch.stack(values).mean()

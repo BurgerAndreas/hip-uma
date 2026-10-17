@@ -51,10 +51,17 @@ def edge_irreps(head, node_embedding, x_edge, edge_index, wigner, wigner_inv):
     Commute the degree-wise projection with rotation and keep its bias outside.
     """
     readout = head.edge_readout
-    messages = readout.backend.node_to_edge_wigner_permute(
-        node_embedding, edge_index, wigner
-    )
-    messages, gates = readout.so2_conv_1(messages, x_edge)
+    if getattr(head, "fused_radial", False):
+        from fairchem.core.frozen_hip.radial import radial_convolution
+
+        messages, gates = radial_convolution(
+            readout.so2_conv_1, node_embedding, edge_index, wigner, x_edge
+        )
+    else:
+        messages = readout.backend.node_to_edge_wigner_permute(
+            node_embedding, edge_index, wigner
+        )
+        messages, gates = readout.so2_conv_1(messages, x_edge)
     messages = readout.act(gates, messages)
     messages = project_convolution(readout.so2_conv_2, head.edge_projection, messages)
     irreps = readout.backend.edge_wigner_inv_permute(messages, wigner_inv).squeeze(-1)

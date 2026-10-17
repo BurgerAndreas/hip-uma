@@ -25,7 +25,12 @@ def _forward(self, inputs):
         (torch.cat((real, -imaginary), dim=1), torch.cat((imaginary, real), dim=1)),
         dim=0,
     )
-    output = F.linear(inputs.flatten(1), weight)
+    operation = F.linear
+    if getattr(self, "scaled_linear", False):
+        from fairchem.core.frozen_hip.linear import linear
+
+        operation = linear
+    output = operation(inputs.flatten(1), weight)
     return output.reshape(inputs.shape[0], 2, -1, self.m_output_channels).unbind(1)
 
 

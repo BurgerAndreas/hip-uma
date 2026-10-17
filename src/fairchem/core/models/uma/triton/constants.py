@@ -12,12 +12,11 @@ from __future__ import annotations
 # Block size for channel vectorization in Triton kernels.
 # Must be a power of 2. sphere_channels must be divisible by this.
 BLOCK_C = 128
+GATHER_BLOCK_C = 64
 
-# Fixed grid size for edge dimension grid-stride loop.
-# Kernels loop: edge_id = program_id(0); while edge_id < num_edges: ...; edge_id += GRID_E_STRIDE
-# This avoids torch.compile recompiles from dynamic edge counts while correctly
-# handling any number of edges (no upper bound).
-GRID_E_STRIDE = 2048
+# Keep a fixed edge stride for reusable kernel specializations. Launch only
+# min(num_edges, GRID_E_STRIDE) programs to avoid empty work on small graphs.
+GRID_E_STRIDE = 8192
 
 # Permutation indices for M-major to L-major ordering.
 # For lmax=2: coefficients ordered as (l=0), (l=1, m=-1,0,1), (l=2, m=-2,-1,0,1,2)

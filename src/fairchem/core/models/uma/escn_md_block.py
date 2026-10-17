@@ -235,10 +235,17 @@ class Edgewise(torch.nn.Module):
         set_mole_ac_start_index(self, ac_mole_start_idx)
 
         with record_function("SO2ConvMessages"):
-            x_message = self.backend.node_to_edge_wigner_permute(
-                x_full, edge_index, wigner
-            )
-            x_message, x_0_gating = self.so2_conv_1(x_message, x_edge)
+            if getattr(self, "fused_radial", False):
+                from fairchem.core.frozen_hip.radial import radial_convolution
+
+                x_message, x_0_gating = radial_convolution(
+                    self.so2_conv_1, x_full, edge_index, wigner, x_edge
+                )
+            else:
+                x_message = self.backend.node_to_edge_wigner_permute(
+                    x_full, edge_index, wigner
+                )
+                x_message, x_0_gating = self.so2_conv_1(x_message, x_edge)
             x_message = self.act(x_0_gating, x_message)
             x_message = self.so2_conv_2(x_message)
             x_message = self.backend.edge_wigner_inv_permute(
@@ -264,10 +271,17 @@ class Edgewise(torch.nn.Module):
         set_mole_ac_start_index(self, ac_mole_start_idx)
 
         with record_function("SO2Conv"):
-            x_message = self.backend.node_to_edge_wigner_permute(
-                x_full, edge_index, wigner
-            )
-            x_message, x_0_gating = self.so2_conv_1(x_message, x_edge)
+            if getattr(self, "fused_radial", False):
+                from fairchem.core.frozen_hip.radial import radial_convolution
+
+                x_message, x_0_gating = radial_convolution(
+                    self.so2_conv_1, x_full, edge_index, wigner, x_edge
+                )
+            else:
+                x_message = self.backend.node_to_edge_wigner_permute(
+                    x_full, edge_index, wigner
+                )
+                x_message, x_0_gating = self.so2_conv_1(x_message, x_edge)
             x_message = self.act(x_0_gating, x_message)
             x_message = self.so2_conv_2(x_message)
             new_embedding = self.backend.permute_wigner_inv_edge_to_node(

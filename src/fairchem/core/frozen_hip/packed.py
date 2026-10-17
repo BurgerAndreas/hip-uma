@@ -176,6 +176,8 @@ def pack_packed_window(window, references, *, include_targets=True):
         )
         for source, rows in grouped.items()
     ]
+    if len(parts) == 1:
+        return parts[0]
     fields = (
         "pos",
         "atomic_numbers",
@@ -272,15 +274,23 @@ def block_mse(edge_blocks, node_blocks, data):
     return torch.stack(pair_sums).mean()
 
 
-def block_rmse(edge_blocks, node_blocks, data):
+def block_rmse(edge_blocks, node_blocks, data, *, absolute=False):
     """
     Average symmetrized-target block norms with equal geometry weights.
     """
     if edge_blocks.is_cuda and getattr(data, "hip_fused_loss", False):
-        from fairchem.core.frozen_hip.kernels import fused_block_rmse
+        from fairchem.core.frozen_hip.kernels import fused_block_mae, fused_block_rmse
 
-        return fused_block_rmse(edge_blocks, node_blocks, data)
+        operation = fused_block_mae if absolute else fused_block_rmse
+        return operation(edge_blocks, node_blocks, data)
     from fairchem.core.frozen_hip.losses import block_rmse_values
+
+    def block_values(error):
+        return (
+            error.float().abs().mean(dim=(-2, -1))
+            if absolute
+            else block_rmse_values(error)
+        )
 
     losses, offset, atom_offset, target_offset = [], 0, 0, 0
     lookup = torch.tensor([[0, 1, 2], [1, 3, 4], [2, 4, 5]], device=node_blocks.device)
@@ -302,8 +312,8 @@ def block_rmse(edge_blocks, node_blocks, data):
         diagonal = nodes + nodes.transpose(-1, -2)
         losses.append(
             (
-                2 * block_rmse_values(predicted - target).sum()
-                + block_rmse_values(diagonal - target_diag).sum()
+                2 * block_values(predicted - target).sum()
+                + block_values(diagonal - target_diag).sum()
             )
             / (n * n)
         )
@@ -311,6 +321,11 @@ def block_rmse(edge_blocks, node_blocks, data):
         atom_offset += n
         target_offset += width
     return torch.stack(losses).mean()
+
+
+def block_mae(edge_blocks, node_blocks, data):
+    """Average Cartesian absolute errors with equal geometry weights."""
+    return block_rmse(edge_blocks, node_blocks, data, absolute=True)
 
 
 class PackedHessianStream(IterableDataset):

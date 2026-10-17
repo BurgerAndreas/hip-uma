@@ -34,6 +34,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--packed-data", type=Path, required=True)
     parser.add_argument("--feature-cache", type=Path, required=True)
+    parser.add_argument("--inventory", type=Path)
     parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--world", type=int, default=1)
     parser.add_argument("--workers", type=int, default=2)
@@ -44,6 +45,7 @@ def main():
     parser.add_argument("--microbatch-pairs", type=int, default=524288)
     parser.add_argument("--window-files", type=int, default=8)
     parser.add_argument("--cache-memory-gb", type=float, default=16)
+    parser.add_argument("--log-every", type=int, default=100000)
     parser.add_argument(
         "--backbone-precision", choices=("fp32", "fp16"), default="fp16"
     )
@@ -56,7 +58,7 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.rank < args.world:
         raise ValueError("Require 0 <= rank < world")
-    if args.duration <= 0 or args.max_files < 0 or args.workers < 0:
+    if args.duration <= 0 or min(args.max_files, args.workers, args.log_every) < 0:
         raise ValueError("Duration must be positive and limits must be nonnegative")
     torch.set_num_threads(2)
     torch.backends.cuda.matmul.allow_tf32 = args.tf32
@@ -73,7 +75,22 @@ def main():
         backbone_graph_version=args.backbone_graph_version,
         fused_backbone=args.fused_backbone,
     )
-    markers = sorted(path.name for path in args.packed_data.glob("*.hip"))
+    markers = (
+        json.loads(args.inventory.read_text())
+        if args.inventory
+        else sorted(path.name for path in args.packed_data.glob("*.hip"))
+    )
+    if not isinstance(markers, list) or any(
+        not isinstance(name, str)
+        or Path(name).name != name
+        or Path(name).suffix != ".hip"
+        for name in markers
+    ):
+        raise ValueError(
+            "Preparation inventory must contain relative compact filenames"
+        )
+    if len(set(markers)) != len(markers):
+        raise ValueError("Preparation inventory contains duplicate files")
     if args.max_files:
         markers = markers[: args.max_files]
     if not markers:
@@ -115,6 +132,7 @@ def main():
     )
     started = time.monotonic()
     computed = reused = 0
+    logged = 0
     completed = True
     iterator = iter(loader)
     try:
@@ -123,6 +141,22 @@ def main():
                 if time.monotonic() - started >= args.duration:
                     completed = False
                     break
+                if args.log_every and computed + reused - logged >= args.log_every:
+                    logged = computed + reused
+                    elapsed = time.monotonic() - started
+                    print(
+                        json.dumps(
+                            dict(
+                                event="feature_preparation_progress",
+                                processed_samples=logged,
+                                computed_samples=computed,
+                                reused_samples=reused,
+                                seconds=elapsed,
+                                computed_samples_s=computed / elapsed,
+                            )
+                        ),
+                        flush=True,
+                    )
                 for data in logical:
                     count = len(data.natoms)
                     if hasattr(data, "hip_features"):
