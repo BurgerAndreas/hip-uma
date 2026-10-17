@@ -19,7 +19,6 @@ from huggingface_hub import hf_hub_download
 
 from fairchem.core.calculate.pretrained_mlip import _MODEL_CKPTS
 
-
 MODEL_NAMES = (
     "uma-s-1p2",
     "uma-s-1p1",
@@ -73,7 +72,9 @@ def _to_config_value(value: Any) -> Any:
 
 
 def _state_dict_stats(state_dict: dict[str, Any]) -> dict[str, Any]:
-    tensors = {key: value for key, value in state_dict.items() if torch.is_tensor(value)}
+    tensors = {
+        key: value for key, value in state_dict.items() if torch.is_tensor(value)
+    }
     total_params = sum(int(value.numel()) for value in tensors.values())
     trainable_size_bytes = sum(
         int(value.numel() * value.element_size()) for value in tensors.values()
@@ -151,9 +152,26 @@ def inspect_model(model_name: str, cache_dir: Path, output_dir: Path) -> dict[st
     state_dict = getattr(checkpoint, "ema_state_dict", None) or getattr(
         checkpoint, "model_state_dict", {}
     )
+    root_variable = (
+        "UMA_MODEL_ROOT"
+        if hf_info["repo_id"] == "facebook/UMA"
+        else "OMOL25_MODEL_ROOT"
+    )
+    portable_root = "${oc.env:" + root_variable + "}"
+    public_source = dict(hf_info)
+    public_source["checkpoint_path"] = (
+        f"{portable_root}/{hf_info['subfolder']}/{hf_info['filename']}"
+    )
+    public_source["references"] = {
+        name: {
+            **spec,
+            "path": f"{portable_root}/{spec['subfolder']}/{spec['filename']}",
+        }
+        for name, spec in hf_info["references"].items()
+    }
     config = {
         "model_name": model_name,
-        "source": hf_info,
+        "source": public_source,
         "checkpoint_type": f"{checkpoint.__class__.__module__}.{checkpoint.__class__.__name__}",
         "state_dict_stats": _state_dict_stats(state_dict),
         "model_config": _to_config_value(getattr(checkpoint, "model_config", {})),
@@ -169,10 +187,10 @@ def inspect_model(model_name: str, cache_dir: Path, output_dir: Path) -> dict[st
         "repo_id": hf_info["repo_id"],
         "filename": hf_info["filename"],
         "subfolder": hf_info["subfolder"],
-        "checkpoint_path": hf_info["checkpoint_path"],
+        "checkpoint_path": public_source["checkpoint_path"],
         "checkpoint_size_bytes": hf_info["checkpoint_size_bytes"],
         "checkpoint_md5": hf_info["checkpoint_md5"],
-        "config_path": str(output_path),
+        "config_path": output_path.name,
         "checkpoint_type": config["checkpoint_type"],
         "state_dict_stats": config["state_dict_stats"],
         "model_config_top_level_keys": list(config["model_config"].keys()),
@@ -191,9 +209,7 @@ def inspect_model(model_name: str, cache_dir: Path, output_dir: Path) -> dict[st
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache-dir", default=".cache/fairchem")
-    parser.add_argument(
-        "--output-dir", default="configs/pretrained/model_configs"
-    )
+    parser.add_argument("--output-dir", default="configs/pretrained/model_configs")
     parser.add_argument("--models", nargs="*", default=list(MODEL_NAMES))
     args = parser.parse_args()
 
