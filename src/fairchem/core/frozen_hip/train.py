@@ -43,7 +43,7 @@ def parse_args():
     p.add_argument("--validation-batches", type=int, default=16)
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--seed", type=int, default=7)
-    p.add_argument("--execution-mode", default="general")
+    p.add_argument("--execution-mode", choices=("general",), default="general")
     p.add_argument("--head-precision", choices=("fp32", "bf16"), default="fp32")
     p.add_argument("--checkpoint-edges", type=int, default=20000)
     p.add_argument("--benchmark", action="store_true")
@@ -61,7 +61,7 @@ def main():
     torch.cuda.set_device(local)
     device = torch.device("cuda", local)
     if world > 1:
-        dist.init_process_group("nccl")
+        dist.init_process_group("nccl", device_id=device)
     torch.set_num_threads(2)
     torch.manual_seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -101,6 +101,7 @@ def main():
         )
 
     def loader(split):
+        worker_count = args.workers if split == "train" else 0
         stream = HessianStream(
             args.data,
             rank=rank,
@@ -118,10 +119,10 @@ def main():
                 "prefetch_factor": 2,
                 "persistent_workers": True,
             }
-            if args.workers
+            if worker_count
             else {}
         )
-        return DataLoader(stream, batch_size=None, num_workers=args.workers, **kw)
+        return DataLoader(stream, batch_size=None, num_workers=worker_count, **kw)
 
     train_loader = loader("train")
     train_iter = iter(train_loader)
@@ -135,7 +136,7 @@ def main():
     signal.signal(signal.SIGUSR1, stop_requested)
     started = time.monotonic()
     window = started
-    metrics = torch.zeros(3, device=device, dtype=torch.float64)
+    metrics = torch.zeros(4, device=device, dtype=torch.float64)
     total_samples = 0
     model.train()
 
@@ -205,6 +206,9 @@ def main():
             head_parameters=sum(p.numel() for p in head.parameters()),
             world_size=world,
             validation="deterministic_parent_index_1pct",
+            available_shards_at_start=sum(
+                1 for _ in args.data.glob("shards/*/*.verified.json")
+            ),
         )
         (args.output / "config.json").write_text(
             json.dumps(public_config, indent=2) + "\n"
@@ -246,6 +250,9 @@ def main():
                     loss.detach().double() * b,
                     count.new_tensor(b).double(),
                     count.new_tensor(sum(data.hip_sizes)).double(),
+                    count.new_tensor(
+                        b if hasattr(data, "hip_features") else 0
+                    ).double(),
                 )
             )
             if step % args.log_every == 0:
@@ -263,6 +270,7 @@ def main():
                         "atoms_s": values[2] / elapsed,
                         "lr": lr,
                         "peak_GB": torch.cuda.max_memory_allocated() / 1e9,
+                        "cached_feature_fraction": values[3] / values[1],
                     }
                     print(json.dumps(row), flush=True)
                     with (args.output / "metrics.jsonl").open("a") as f:
@@ -310,6 +318,11 @@ def main():
                 model.train()
                 window = time.monotonic()
     finally:
+        # Stop the infinite loader before interpreter and CUDA teardown. Held-out
+        # evaluation is bounded and uses the main process rather than abandoned
+        # multiprocessing prefetch queues.
+        if args.workers:
+            train_iter._shutdown_workers()
         if not args.benchmark:
             save()
     if rank == 0:
