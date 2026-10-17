@@ -406,6 +406,7 @@ def main():
     signal.signal(signal.SIGUSR1, stop_requested)
     started = time.monotonic()
     window = started
+    window_updates = 0
     metrics = torch.zeros(5, device=device, dtype=torch.float64)
     host_metrics = [0, 0, 0, 0]
     total_samples = 0
@@ -772,6 +773,7 @@ def main():
             if profiler is not None:
                 profiler.step()
             step += 1
+            window_updates += 1
             total_samples += local_count
             if step % args.log_every == 0:
                 torch.cuda.synchronize()
@@ -784,11 +786,12 @@ def main():
                     row = {
                         "event": "train",
                         "wall_time": time.time(),
-                        "step_seconds": elapsed / args.log_every,
+                        "step_seconds": elapsed / window_updates,
+                        "window_updates": window_updates,
                         "mean_microbatches_per_gpu_step": values[4]
-                        / (args.log_every * world),
-                        "mean_global_batch": values[1] / args.log_every,
-                        "mean_global_atoms": values[2] / args.log_every,
+                        / (window_updates * world),
+                        "mean_global_batch": values[1] / window_updates,
+                        "mean_global_atoms": values[2] / window_updates,
                         "step": step,
                         "loss_name": args.loss,
                         args.loss.replace("-", "_"): values[0] / values[1],
@@ -804,6 +807,7 @@ def main():
                         f.write(json.dumps(row) + "\n")
                 metrics.zero_()
                 host_metrics = [0, 0, 0, 0]
+                window_updates = 0
                 window = time.monotonic()
             if step % args.checkpoint_every == 0:
                 save()
