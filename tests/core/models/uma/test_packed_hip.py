@@ -94,6 +94,71 @@ def test_packed_batch_has_no_dense_hessian_and_preserves_ragged_rows():
     assert data.hip_feature_scale == 0.5
 
 
+def test_feature_preparation_reads_geometry_without_target_arrays():
+    from fairchem.core.frozen_hip.packed import pack_packed_window
+
+    values = dict(
+        natoms=np.array([2, 1]),
+        atom_ptr=np.array([0, 2, 3]),
+        atomic_numbers=np.ones(3, dtype=np.int64),
+        coords=np.arange(9, dtype=np.float32).reshape(3, 3),
+        charge=np.zeros(2),
+        spin=np.ones(2),
+        omol_index=np.array([7, 19]),
+    )
+    # Target keys are absent, so any target access fails this preparation path.
+    single = make_packed_batch(values, np.array([1, 0]), include_targets=False)
+    mixed = pack_packed_window([(values, {})], [(0, 1), (0, 0)], include_targets=False)
+    for data in (single, mixed):
+        assert data.natoms.tolist() == [1, 2]
+        assert data.sid == ["19", "7"]
+        assert data.hip_atom_ptr.tolist() == [0, 1, 3]
+        assert not hasattr(data, "hip_pair_targets")
+        assert not hasattr(data, "hip_diagonal_targets")
+        assert not hasattr(data, "hessian")
+    torch.testing.assert_close(single.pos, mixed.pos)
+
+
+def test_read_only_features_skip_writer_metadata_without_losing_cache_hits(tmp_path):
+    from fairchem.core.frozen_hip.cache import FeatureCacheWriter
+    from fairchem.core.frozen_hip.data import validation_mask
+    from fairchem.core.frozen_hip.packed import PackedHessianStream
+
+    candidates = np.arange(1000)
+    ids = candidates[~validation_mask(candidates)][:2]
+    values = dict(
+        natoms=np.array([2, 1]),
+        atom_ptr=np.array([0, 2, 3]),
+        atomic_numbers=np.ones(3, dtype=np.int64),
+        coords=np.arange(9, dtype=np.float32).reshape(3, 3),
+        charge=np.zeros(2),
+        spin=np.ones(2),
+        omol_index=ids,
+    )
+    write_packed(tmp_path / "bundle.hip", values, dict(backbone_sha256="frozen"))
+    options = dict(
+        root=tmp_path,
+        markers=["bundle.hip"],
+        backbone_sha256="frozen",
+        feature_cache=tmp_path / "features",
+        max_passes=1,
+        include_targets=False,
+    )
+    writer = FeatureCacheWriter(tmp_path / "features")
+    for logical in PackedHessianStream(**options):
+        for data in logical:
+            writer.store(data, torch.ones(len(data.pos), 9, 4))
+    seen = []
+    for logical in PackedHessianStream(**options, include_cache_metadata=False):
+        for data in logical:
+            seen.extend(data.sid)
+            assert not hasattr(data, "hip_cache_groups")
+            torch.testing.assert_close(
+                data.hip_features, torch.ones(len(data.pos), 9, 4)
+            )
+    assert sorted(int(sid) for sid in seen) == ids.tolist()
+
+
 def test_packed_windows_mix_sizes_and_cover_rows_once_across_ranks_and_workers(
     tmp_path, monkeypatch
 ):

@@ -56,7 +56,9 @@ def main():
     parser.add_argument("--optimized-only", action="store_true")
     parser.add_argument("--projected-readout", action="store_true")
     parser.add_argument("--loss", choices=("mse", "block-rmse"), default="mse")
-    parser.add_argument("--backbone-graph-version", type=int, choices=(1, 2), default=2)
+    parser.add_argument(
+        "--backbone-graph-version", type=int, choices=(1, 2, 4), default=2
+    )
     parser.add_argument("--fused-backbone", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)

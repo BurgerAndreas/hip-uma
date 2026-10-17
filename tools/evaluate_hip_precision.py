@@ -37,7 +37,9 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--projected-readout", action="store_true")
-    parser.add_argument("--backbone-graph-version", type=int, choices=(1, 2), default=2)
+    parser.add_argument(
+        "--backbone-graph-version", type=int, choices=(1, 2, 4), default=2
+    )
     parser.add_argument("--fused-backbone", action="store_true")
     args = parser.parse_args()
     torch.set_num_threads(2)

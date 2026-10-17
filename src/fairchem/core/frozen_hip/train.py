@@ -24,7 +24,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
-from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter
+from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter, feature_namespace
 from fairchem.core.frozen_hip.data import HessianStream
 from fairchem.core.frozen_hip.losses import structure_block_rmse
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
@@ -92,6 +92,7 @@ def parse_args():
     p.add_argument("--benchmark", action="store_true")
     p.add_argument("--resume", type=Path)
     p.add_argument("--feature-cache", type=Path)
+    p.add_argument("--feature-cache-read-only", action="store_true")
     p.add_argument("--cache-memory-gb", type=float, default=16.0)
     p.add_argument("--packed-data", type=Path)
     p.add_argument("--fused-rotations", action="store_true")
@@ -100,7 +101,7 @@ def parse_args():
     p.add_argument("--block-so2", action="store_true")
     p.add_argument("--projected-readout", action="store_true")
     p.add_argument("--backbone-precision", choices=("fp32", "fp16"), default="fp32")
-    p.add_argument("--backbone-graph-version", type=int, choices=(1, 2), default=2)
+    p.add_argument("--backbone-graph-version", type=int, choices=(1, 2, 4), default=2)
     p.add_argument("--tf32", action="store_true")
     p.add_argument("--compile-head", action="store_true")
     p.add_argument("--stop-file", type=Path)
@@ -181,14 +182,13 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = args.tf32
     cache_root = (
         args.feature_cache
-        / (
-            frozen_hash
-            + ("-tf32" if args.tf32 else "-fp32")
-            + "-geometry1"
-            + ("-backbonefp16" if args.backbone_precision == "fp16" else "")
-            + ("-grouped" if args.grouped_mole else "")
-            + ("-radius1" if args.backbone_graph_version == 1 else "")
-            + ("-fusedbody" if args.fused_backbone else "")
+        / feature_namespace(
+            frozen_hash,
+            tf32=args.tf32,
+            backbone_precision=args.backbone_precision,
+            grouped_mole=args.grouped_mole,
+            backbone_graph_version=args.backbone_graph_version,
+            fused_backbone=args.fused_backbone,
         )
         if args.feature_cache
         else None
@@ -197,7 +197,7 @@ def main():
         AsyncFeatureCacheWriter(
             cache_root, max_bytes=int(args.cache_memory_gb * (1 << 30))
         )
-        if cache_root
+        if cache_root and not args.feature_cache_read_only
         else None
     )
     if args.fused_rotations:
@@ -301,6 +301,7 @@ def main():
                 grouped_mole=args.grouped_mole,
                 window_files=args.window_shards,
                 feature_cache=cache_root,
+                include_cache_metadata=not args.feature_cache_read_only,
             )
         else:
             stream = HessianStream(
@@ -397,7 +398,8 @@ def main():
             else:
                 emb = model.features(data, args.backbone_precision)
                 if cache_writer and model.training:
-                    cache_writer.store(data, emb["node_embedding"])
+                    with phase("feature_cache_store"):
+                        cache_writer.store(data, emb["node_embedding"])
         from torch.utils.checkpoint import checkpoint
 
         def forward(x):
@@ -435,6 +437,8 @@ def main():
             "backbone_graph_version": args.backbone_graph_version,
             "fused_backbone": args.fused_backbone,
             "grouped_mole": args.grouped_mole,
+            "expert_fp32_output": args.grouped_mole
+            and args.backbone_precision == "fp16",
             "block_so2": args.block_so2,
             "projected_readout": args.projected_readout,
             "fused_rotations": args.fused_rotations,

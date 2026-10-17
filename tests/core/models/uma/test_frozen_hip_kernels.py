@@ -147,6 +147,21 @@ def test_grouped_frozen_linear_matches_independent_system_experts(half, factor):
     )
 
 
+def test_fp16_expert_can_retain_fp32_output_above_half_range():
+    from fairchem.core.frozen_hip.grouped_mole import grouped_linear
+    from fairchem.core.models.uma.nn.mole import MOLEGlobals
+
+    sizes = torch.tensor([2, 0, 3])
+    globals_ = MOLEGlobals(None, sizes)
+    x = torch.full((5, 384), 1990.0, device="cuda")
+    weights = torch.ones((3, 128, 384), device="cuda")
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+        result = grouped_linear(x, weights, None, globals_, fp32_output=True)
+    assert result.dtype == torch.float32
+    torch.testing.assert_close(result, torch.full_like(result, 1990.0 * 384))
+    assert torch.isfinite(result).all()
+
+
 def test_async_feature_cache_owns_cuda_transfer_until_atomic_publication(tmp_path):
     from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter, cached_features
 
@@ -254,6 +269,52 @@ def test_vectorized_backbone_graph_matches_grid_graph_for_nonperiodic_molecules(
 
     for got, wanted in zip(canonical(actual), canonical(reference), strict=True):
         torch.testing.assert_close(got, wanted)
+
+
+@pytest.mark.parametrize("limit", [0, 8, 300])
+@pytest.mark.parametrize("strict", [False, True])
+def test_fused_radius_matches_reference_cutoff_and_neighbor_rules(limit, strict):
+    from fairchem.core.graph.compute import generate_graph
+
+    torch.manual_seed(623)
+    data = metadata([1, 2, 7, 350])
+    data.cell = torch.eye(3, device="cuda").repeat(len(data.hip_sizes), 1, 1)
+    data.pbc = torch.zeros(len(data.hip_sizes), 3, dtype=torch.bool)
+    # Include coincident atoms, excluded near-zero distances, and cutoff ties.
+    data.pos[1:3] = torch.tensor([[0, 0, 0], [0.005, 0, 0]], device="cuda")
+    data.pos[3:10] = torch.tensor(
+        [[0, 0, 0], [0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1]],
+        device="cuda",
+    )
+    expected = generate_graph(data, 1.0, limit, strict, 1, data.pbc)
+    actual = generate_graph(data, 1.0, limit, strict, 4, data.pbc)
+    for key in ("edge_index", "edge_distance", "edge_distance_vec", "neighbors"):
+        torch.testing.assert_close(actual[key], expected[key])
+    assert not actual["cell_offsets"].any()
+
+
+@pytest.mark.parametrize("sizes", [[1], [1, 1], [2, 5, 27, 350]])
+def test_fused_radius_handles_empty_graphs_and_large_pruned_molecules(sizes):
+    from fairchem.core.graph.compute import generate_graph
+
+    data = metadata(sizes)
+    data.cell = torch.eye(3, device="cuda").repeat(len(sizes), 1, 1)
+    data.pbc = torch.zeros(len(sizes), 3, dtype=torch.bool)
+    expected = generate_graph(data, 6.0, 300, False, 1, data.pbc)
+    actual = generate_graph(data, 6.0, 300, False, 4, data.pbc)
+    for key in ("edge_index", "edge_distance", "edge_distance_vec", "neighbors"):
+        torch.testing.assert_close(actual[key], expected[key])
+
+
+def test_fused_radius_rejects_periodicity_and_position_gradients():
+    from fairchem.core.frozen_hip.radius import nonperiodic_graph
+
+    data = metadata([2])
+    with pytest.raises(ValueError, match="nonperiodic"):
+        nonperiodic_graph(data, 6, 300, torch.ones(1, 3, dtype=torch.bool))
+    data.pos.requires_grad_(True)
+    with pytest.raises(ValueError, match="frozen coordinates"):
+        nonperiodic_graph(data, 6, 300, torch.zeros(1, 3, dtype=torch.bool))
 
 
 def test_custom_atomic_data_pins_targets_and_keeps_cpu_cache_metadata():

@@ -223,9 +223,9 @@ python -m fairchem.core.frozen_hip.train \
   --data "$DATA_ROOT" --packed-data "$PACKED_ROOT" --output "$RUN_ROOT" \
   --workers 2 --max-batch 64 --max-atoms 2560 --microbatch-pairs 524288 \
   --loss block-rmse --tf32 --backbone-precision fp16 --head-precision fp32 \
-  --backbone-graph-version 1 --grouped-mole --fused-backbone \
+  --backbone-graph-version 4 --grouped-mole --fused-backbone \
   --fused-rotations --block-so2 --projected-readout --compile-head \
-  --feature-cache "$FEATURE_CACHE_ROOT" --cache-memory-gb 16 \
+  --feature-cache "$FEATURE_CACHE_ROOT" --feature-cache-read-only \
   --validate-every 100000 --steps 200000
 ```
 
@@ -405,3 +405,88 @@ atom counts. GPU activity therefore varies between batches. Activity above
 At 0.1413 seconds per update, 200,000 updates need about 7.8 hours.
 This estimate excludes compilation, queue time, validation, and checkpoint I/O.
 Different molecular-size sequences and feature-cache hits change this estimate.
+
+### Fused molecular radius graphs and expert tiles
+
+`--backbone-graph-version 4` selects a frozen molecular graph kernel.
+It supports nonperiodic FP32 coordinates and up to 1,024 atoms per molecule.
+One pass selects neighbors. A second pass writes compact edges and distances.
+Small padded masks serve as temporary scratch space. Hessian storage and
+returned graph edges still use indices without size padding.
+
+The kernel preserves the reference cutoff, near-zero distance exclusion,
+and non-strict neighbor rule. That rule uses sorted squared distance at the
+zero-based neighbor limit, then adds 0.01. Strict neighbor pruning uses the
+reference implementation. Graph partitioning and coordinate gradients remain
+unsupported by the fused path. Tests include coincident atoms, cutoff ties,
+neighbor pruning, single atoms, and empty graphs.
+
+The bounded graph trace reduces graph CPU time from 41.5 ms to 5.5 ms
+across eight updates. Device-to-host copies across the trace fall from 260
+to 44. Full training comparisons must also check resulting throughput.
+
+FP16 grouped expert contractions now use 64 by 128 output tiles and
+a reduction width of 64. FP32 retains its previous tiles.
+The tile metadata includes the row width, so precision switches cannot reuse
+incompatible prefix counts. On six captured expert shapes, aggregate kernel
+time falls from 3.81 ms to 1.72 ms. Their FP16 outputs match the previous tiles
+exactly in this check. Full training benchmarks measure the resulting throughput
+separately.
+
+Some dimers exceed FP16 range in the second expert convolution.
+The grouped backend keeps its matrix inputs in FP16 and retains FP32 outputs
+through inverse rotation. This avoids an overflow without a per-batch CPU check.
+The cache namespace records this output precision. Embedded feature bundles
+must also record `expert_fp32_output`. Cache publication rejects nonfinite values.
+Legacy cache reads check finiteness when their metadata lacks this guarantee.
+
+The safe mixed-precision configuration reaches 376.3 molecules/s in the
+full-stream benchmark, with 90.4% mean GPU activity and a 96% median.
+Peak allocated memory remains 47.1 GB. The measurement uses the same
+step-12,200 through step-12,720 molecular sequence as the earlier benchmark.
+Shared-cluster timings vary. Controlled repeat timings also show this variation.
+
+GPU kernel correlation assigns 68.6% of execution time to the HIP head and
+its backward pass. Frozen inference accounts for 26.9%; loss kernels account
+for 0.03%. These percentages exclude memory copies and idle time.
+The head's matrix operations and memory traffic offer the largest remaining
+kernel targets.
+
+### Prepare frozen features without reading Hessian targets
+
+`tools/cache_packed_hip_features.py` reads existing compact geometry directly.
+It skips Hessian arrays on the CPU and leaves targets off the GPU.
+It publishes the same FP32 feature cache that training already reads.
+Original HDF5 files and compact target files need no conversion.
+
+Run independent preparation workers with disjoint rank numbers:
+
+```bash
+python tools/cache_packed_hip_features.py \
+  --packed-data "$PACKED_ROOT" --feature-cache "$FEATURE_CACHE_ROOT" \
+  --tf32 --backbone-precision fp16 --backbone-graph-version 4 \
+  --grouped-mole --fused-backbone --rank "$PREP_RANK" --world "$PREP_WORLD"
+```
+
+Use the same world size and distinct ranks for one preparation pass.
+Each process uses one GPU. Completed bundles survive restarts.
+The tool verifies each assigned bundle and reports missing caches.
+If memory limits prevent complete publication, reduce the window size or
+increase cache memory. Rerun preparation to fill missing bundles.
+`--max-files` and `--duration` support bounded checks.
+
+Training must use the same inference flags and feature-cache root.
+`--feature-cache-read-only` consumes complete caches without creating new ones.
+It still computes frozen inference for missing features.
+The default continues to publish features during training.
+
+The file-backed comparison uses 53,880 small molecules in 17 bundles.
+On the same GPU and matched updates, online inference reaches 1,084 molecules/s.
+Prepared features reach 3,792 molecules/s, a 3.50 times update speed increase.
+These small-molecule rates depend on the cohort. Feature preparation remains
+a separate cost. Caching helps when experiments reuse features or preparation
+runs in parallel. The complete FP32 feature cache needs about 2.04 TB.
+
+The safe path passes evaluation on all 10,027 fixed samples and the previously
+failing dimer batch. Cache checks verify 53,880 finite samples and successful
+reuse without recomputation. Production training remains a separate action.

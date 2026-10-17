@@ -47,6 +47,13 @@ def summarize(events):
     end = max(row["ts"] + row["dur"] for row in steps)
     devices = defaultdict(list)
     kernel_counts = defaultdict(int)
+    kernel_ms_by_external = defaultdict(float)
+    operations = {
+        row["args"]["External id"]: row
+        for row in events
+        if row.get("cat") in ("cpu_op", "user_annotation")
+        and "External id" in row.get("args", {})
+    }
     for row in events:
         if row.get("cat") == "kernel" and "dur" in row:
             a, b = max(begin, row["ts"]), min(end, row["ts"] + row["dur"])
@@ -54,6 +61,9 @@ def summarize(events):
                 device = str(row.get("args", {}).get("device", 0))
                 devices[device].append((a, b))
                 kernel_counts[device] += 1
+                kernel_ms_by_external[row.get("args", {}).get("External id")] += (
+                    b - a
+                ) / 1000
     phases = {}
     items = [
         row
@@ -64,6 +74,7 @@ def summarize(events):
         "data_load",
         "device_transfer",
         "frozen_backbone",
+        "feature_cache_store",
         "generate_graph",
         "hip_head",
         "hessian_loss",
@@ -86,6 +97,17 @@ def summarize(events):
             calls=len(sections),
             cpu_ms=sum(row["dur"] for row in sections) / 1000,
             scalar_extractions=extracted,
+            gpu_kernel_ms=sum(
+                duration
+                for external, duration in kernel_ms_by_external.items()
+                if external in operations
+                and any(
+                    section["ts"]
+                    <= operations[external]["ts"]
+                    < section["ts"] + section["dur"]
+                    for section in sections
+                )
+            ),
         )
     return dict(
         steps=len(steps),
@@ -95,6 +117,7 @@ def summarize(events):
             for device, intervals in devices.items()
         },
         kernel_counts=dict(kernel_counts),
+        gpu_kernel_ms_total=sum(kernel_ms_by_external.values()),
         device_to_host_copies=sum(
             row.get("cat") == "gpu_memcpy" and "DtoH" in row.get("name", "")
             for row in events

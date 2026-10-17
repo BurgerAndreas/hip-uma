@@ -112,7 +112,9 @@ def open_packed(path):
     return arrays, header
 
 
-def make_packed_batch(values, rows, feature_scale=1.0, cache_meta=None):
+def make_packed_batch(
+    values, rows, feature_scale=1.0, cache_meta=None, *, include_targets=True
+):
     """
     Gather variable-size rows while retaining compact upper-triangle targets.
     """
@@ -124,18 +126,20 @@ def make_packed_batch(values, rows, feature_scale=1.0, cache_meta=None):
         np.r_[0, np.cumsum(9 * sizes * (sizes - 1) // 2)]
     )
     data.hip_fused_graph = True
-    ap, pp = values["atom_ptr"], values["pair_ptr"]
-    data.hip_pair_targets = torch.from_numpy(
-        np.concatenate([values["pair_targets"][pp[r] : pp[r + 1]] for r in rows])
-    )
-    data.hip_diagonal_targets = torch.from_numpy(
-        np.concatenate(
-            [values["diagonal_targets"][ap[r] * 6 : ap[r + 1] * 6] for r in rows]
+    ap = values["atom_ptr"]
+    if include_targets:
+        pp = values["pair_ptr"]
+        data.hip_pair_targets = torch.from_numpy(
+            np.concatenate([values["pair_targets"][pp[r] : pp[r + 1]] for r in rows])
         )
-    )
-    data.hip_asymmetry_mse = torch.from_numpy(
-        np.asarray(values["asymmetry_mse"])[rows].copy()
-    )
+        data.hip_diagonal_targets = torch.from_numpy(
+            np.concatenate(
+                [values["diagonal_targets"][ap[r] * 6 : ap[r + 1] * 6] for r in rows]
+            )
+        )
+        data.hip_asymmetry_mse = torch.from_numpy(
+            np.asarray(values["asymmetry_mse"])[rows].copy()
+        )
     if "features" in values:
         data.hip_features = torch.from_numpy(
             np.concatenate([values["features"][ap[r] : ap[r + 1]] for r in rows])
@@ -155,7 +159,7 @@ def make_packed_batch(values, rows, feature_scale=1.0, cache_meta=None):
     return data
 
 
-def pack_packed_window(window, references):
+def pack_packed_window(window, references, *, include_targets=True):
     """
     Mix bundle sizes before packing, while preserving every row's labels.
     """
@@ -168,6 +172,7 @@ def pack_packed_window(window, references):
             np.asarray(rows),
             window[source][1].get("feature_scale", 1.0),
             window[source][1].get("_cache_meta"),
+            include_targets=include_targets,
         )
         for source, rows in grouped.items()
     ]
@@ -193,8 +198,9 @@ def pack_packed_window(window, references):
         dataset=["omol"] * count,
         sid=[sid for part in parts for sid in part.sid],
     )
-    for key in ("hip_pair_targets", "hip_diagonal_targets", "hip_asymmetry_mse"):
-        setattr(data, key, torch.cat([getattr(part, key) for part in parts]))
+    if include_targets:
+        for key in ("hip_pair_targets", "hip_diagonal_targets", "hip_asymmetry_mse"):
+            setattr(data, key, torch.cat([getattr(part, key) for part in parts]))
     sizes = data.natoms
     data.hip_atom_ptr = torch.cat((sizes.new_zeros(1), sizes.cumsum(0)))
     data.hip_edge_ptr = torch.cat((sizes.new_zeros(1), (sizes * (sizes - 1)).cumsum(0)))
@@ -333,6 +339,8 @@ class PackedHessianStream(IterableDataset):
         max_batch=64,
         pair_budget=196608,
         logical_pair_budget=1000000000,
+        include_targets=True,
+        include_cache_metadata=True,
     ):
         super().__init__()
         self.root, self.markers = Path(root), markers
@@ -343,6 +351,8 @@ class PackedHessianStream(IterableDataset):
         self.fused_backbone = fused_backbone
         self.feature_cache = feature_cache
         self.logical_pair_budget = logical_pair_budget
+        self.include_targets = include_targets
+        self.include_cache_metadata = include_cache_metadata
         if window_files < 1:
             raise ValueError("Packed window size must be positive")
         self.window_files, self.max_passes = window_files, max_passes
@@ -396,6 +406,14 @@ class PackedHessianStream(IterableDataset):
                             raise ValueError(
                                 "Packed features use different expert kernels"
                             )
+                        if (
+                            self.grouped_mole
+                            and self.backbone_precision == "fp16"
+                            and header.get("expert_fp32_output", False) is not True
+                        ):
+                            raise ValueError(
+                                "Packed features use unsafe expert output precision"
+                            )
                     if self.feature_cache:
                         digest = hashlib.sha256(
                             str(header.get("fingerprint", "")).encode()
@@ -411,15 +429,16 @@ class PackedHessianStream(IterableDataset):
                             if features is not None:
                                 values = {**values, "features": features}
                                 header["feature_scale"] = 1.0
-                        header["_cache_meta"] = dict(
-                            hip_cache_key=key,
-                            hip_total_atoms=int(values["atom_ptr"][-1]),
-                            hip_row_count=len(values["natoms"]),
-                            hip_training_rows=np.flatnonzero(
-                                ~validation_mask(values["omol_index"])
-                            ).tolist(),
-                            hip_data_sha256=source_sha,
-                        )
+                        if self.include_cache_metadata:
+                            header["_cache_meta"] = dict(
+                                hip_cache_key=key,
+                                hip_total_atoms=int(values["atom_ptr"][-1]),
+                                hip_row_count=len(values["natoms"]),
+                                hip_training_rows=np.flatnonzero(
+                                    ~validation_mask(values["omol_index"])
+                                ).tolist(),
+                                hip_data_sha256=source_sha,
+                            )
                     window.append((values, header))
                 references, sizes, cached = [], [], []
                 for source, (values, _) in enumerate(window):
@@ -440,7 +459,11 @@ class PackedHessianStream(IterableDataset):
                 rng.shuffle(batches)
                 for batch in batches:
                     yield [
-                        pack_packed_window(window, [references[i] for i in indices])
+                        pack_packed_window(
+                            window,
+                            [references[i] for i in indices],
+                            include_targets=self.include_targets,
+                        )
                         for indices in microbatch_indices(
                             batch, sizes, self.pair_budget
                         )

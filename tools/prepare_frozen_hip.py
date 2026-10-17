@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import torch
 
+from fairchem.core.frozen_hip.cache import feature_namespace
 from fairchem.core.frozen_hip.data import HessianStream
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash
 from fairchem.core.frozen_hip.packed import (
@@ -49,7 +50,9 @@ def main():
     parser.add_argument(
         "--backbone-precision", choices=("fp32", "fp16"), default="fp32"
     )
-    parser.add_argument("--backbone-graph-version", type=int, choices=(1, 2), default=2)
+    parser.add_argument(
+        "--backbone-graph-version", type=int, choices=(1, 2, 4), default=2
+    )
     parser.add_argument("--max-atoms", type=int, default=4096)
     args = parser.parse_args()
     if args.group_shards < 1 or not 0 <= args.rank < args.world:
@@ -106,6 +109,8 @@ def main():
         )
         if not args.targets_only:
             identity["grouped_mole"] = args.grouped_mole
+            if args.grouped_mole and args.backbone_precision == "fp16":
+                identity["expert_fp32_output"] = True
             if args.fused_backbone:
                 identity["fused_backbone"] = True
             if args.backbone_graph_version != 2:
@@ -132,13 +137,13 @@ def main():
             max_passes=1,
             feature_cache=(
                 args.feature_cache
-                / (
-                    frozen
-                    + "-tf32-geometry1"
-                    + ("-backbonefp16" if args.backbone_precision == "fp16" else "")
-                    + ("-grouped" if args.grouped_mole else "")
-                    + ("-radius1" if args.backbone_graph_version == 1 else "")
-                    + ("-fusedbody" if args.fused_backbone else "")
+                / feature_namespace(
+                    frozen,
+                    tf32=True,
+                    backbone_precision=args.backbone_precision,
+                    grouped_mole=args.grouped_mole,
+                    backbone_graph_version=args.backbone_graph_version,
+                    fused_backbone=args.fused_backbone,
                 )
                 if args.feature_cache and not args.targets_only
                 else None

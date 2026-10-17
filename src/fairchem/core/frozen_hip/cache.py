@@ -17,6 +17,30 @@ from pathlib import Path
 import numpy as np
 
 
+def feature_namespace(
+    backbone_sha256,
+    *,
+    tf32=True,
+    backbone_precision="fp32",
+    grouped_mole=False,
+    backbone_graph_version=2,
+    fused_backbone=False,
+):
+    """
+    Share scientific feature identities between preparation and training.
+    """
+    return (
+        backbone_sha256
+        + ("-tf32" if tf32 else "-fp32")
+        + "-geometry1"
+        + ("-backbonefp16" if backbone_precision == "fp16" else "")
+        + ("-grouped" if grouped_mole else "")
+        + ("-expertout32" if grouped_mole and backbone_precision == "fp16" else "")
+        + (f"-radius{backbone_graph_version}" if backbone_graph_version != 2 else "")
+        + ("-fusedbody" if fused_backbone else "")
+    )
+
+
 def cached_features(root, key, source_sha256):
     """Open only complete feature arrays tied to the source content hash."""
     path = Path(root) / f"{key}.npy"
@@ -29,6 +53,8 @@ def cached_features(root, key, source_sha256):
     values = np.load(path, mmap_mode="r")
     if list(values.shape) != meta["shape"] or values.dtype != np.float32:
         raise ValueError("Frozen feature cache shape or dtype differs")
+    if not meta.get("finite", False) and not np.isfinite(values).all():
+        raise ValueError("Frozen feature cache contains nonfinite values")
     return values
 
 
@@ -48,6 +74,8 @@ class FeatureCacheWriter:
 
     def store(self, data, features):
         host = features.detach().float().cpu().numpy()
+        if not np.isfinite(host).all():
+            raise ValueError("Frozen features contain nonfinite values")
         if hasattr(data, "hip_cache_groups"):
             for group in data.hip_cache_groups:
                 self._store(
@@ -88,6 +116,7 @@ class FeatureCacheWriter:
                         "source_sha256": data.hip_data_sha256,
                         "shape": list(array.shape),
                         "training_only": True,
+                        "finite": True,
                     }
                 )
                 + "\n"

@@ -10,6 +10,7 @@ Check dense label packing, held-out membership, and balanced molecular losses.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from fairchem.core.frozen_hip.data import make_batch, validation_mask
@@ -118,6 +119,40 @@ def test_feature_cache_exposes_only_complete_training_rows(tmp_path):
     result = cached_features(tmp_path, data.hip_cache_key, "source")
     np.testing.assert_array_equal(result[:2], first.numpy())
     np.testing.assert_array_equal(result[3:], last.numpy())
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_feature_cache_never_publishes_nonfinite_values(tmp_path, value):
+    from types import SimpleNamespace
+
+    from fairchem.core.frozen_hip.cache import FeatureCacheWriter
+
+    data = SimpleNamespace(
+        hip_cache_key="bundle",
+        hip_data_sha256="source",
+        hip_total_atoms=1,
+        hip_row_count=1,
+        hip_rows=[0],
+        hip_atom_spans=[(0, 1)],
+        hip_training_rows=[0],
+    )
+    writer = FeatureCacheWriter(tmp_path)
+    with pytest.raises(ValueError, match="nonfinite"):
+        writer.store(data, torch.full((1, 9, 4), value))
+    assert not list(tmp_path.rglob("*.json"))
+
+
+def test_feature_cache_rejects_nonfinite_legacy_arrays(tmp_path):
+    import json
+
+    from fairchem.core.frozen_hip.cache import cached_features
+
+    np.save(tmp_path / "bundle.npy", np.full((1, 9, 4), np.nan, dtype=np.float32))
+    (tmp_path / "bundle.json").write_text(
+        json.dumps(dict(source_sha256="source", shape=[1, 9, 4]))
+    )
+    with pytest.raises(ValueError, match="nonfinite"):
+        cached_features(tmp_path, "bundle", "source")
 
 
 def test_molecular_mse_weights_each_molecule_equally():

@@ -135,7 +135,8 @@ def generate_graph(
         cutoff (float): The maximum distance between atoms to consider them as neighbors.
         max_neighbors (int): The maximum number of neighbors to consider for each atom.
         enforce_max_neighbors_strictly (bool): Whether to strictly enforce the maximum number of neighbors.
-        radius_pbc_version: the version of radius_pbc impl (1, 2, or 3 for NVIDIA)
+        radius_pbc_version: the radius graph implementation. Version 4 supports
+            frozen nonperiodic molecular coordinates through HIP metadata.
         pbc (list[bool]): The periodic boundary conditions in 3 dimensions, defaults to [True,True,True] for 3D pbc
         node_partition (torch.Tensor | None): The partitioning of the nodes (atoms) for distributed inference. If provided, returned graph will be filtered to keep only edges where the target atom (edge_index[1,:]) belongs to the current rank's partition.
 
@@ -148,7 +149,13 @@ def generate_graph(
             - 'offset_distances' (torch.Tensor): Distances between the atoms connected by the edges, including the cell offsets.
             - 'neighbors' (torch.Tensor): Number of neighbors for each atom.
     """
-    if radius_pbc_version == 1:
+    if radius_pbc_version == 4 and not enforce_max_neighbors_strictly:
+        from fairchem.core.frozen_hip.radius import nonperiodic_graph
+
+        if node_partition is not None:
+            raise ValueError("Fused molecular graphs do not support graph partitioning")
+        return nonperiodic_graph(data, cutoff, max_neighbors, pbc)
+    if radius_pbc_version in (1, 4):
         radius_graph_pbc_fn = radius_graph_pbc
     elif radius_pbc_version == 2:
         radius_graph_pbc_fn = radius_graph_pbc_v2

@@ -276,3 +276,13 @@ This includes:
 - Block RMSE ignores the antisymmetric MSE constant. Use explicit symmetrized
   targets and record the objective in checkpoints. Do not mix optimizer states
   across loss changes during normal training.
+- The non-strict radius graph uses sorted squared distance at index `limit`,
+  then adds 0.01. Preserve this rule when replacing neighbor pruning.
+- Guard single-element Triton sorts at compile time. An unreachable dynamic
+  branch can still trigger compilation errors for a one-element sort.
+- Shallow copies of `AtomicData` share its `__keys__` set. Copy that set before
+  adding generated fields, or later transfers can access missing attributes.
+- Some dimers overflow FP16 in frozen `so2_conv_2` expert outputs. Keep their
+  tensor-core inputs in FP16 and retain FP32 accumulators through rotation.
+  Reject nonfinite features before cache publication and isolate cache namespaces
+  when the expert output precision changes.
