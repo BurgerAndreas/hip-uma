@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=8)
+    parser.add_argument("--sizes", type=int, nargs="+", default=[16, 64, 128, 256, 350])
     args = parser.parse_args()
     torch.set_num_threads(2)
     device = "cuda"
@@ -35,12 +36,16 @@ def main():
     initial = copy.deepcopy(model.head.state_dict())
     candidates = []
     markers = sorted(args.data.glob("shards/*/*.verified.json"))
-    for path in markers[:: max(1, len(markers) // 256)]:
+    largest = args.data / "shards/41/shard_41910.verified.json"
+    cohort = markers[:: max(1, len(markers) // 256)]
+    if largest.exists():
+        cohort.append(largest)
+    for path in cohort:
         record = json.loads(path.read_text())
         with h5py.File(args.data / record["path"]) as f:
             candidates.append((int(f["natoms"][0]), record["path"]))
     selected = sorted(
-        {min(candidates, key=lambda x: abs(x[0] - n)) for n in (16, 64, 128, 256, 350)}
+        {min(candidates, key=lambda x: abs(x[0] - n)) for n in args.sizes}
     )
     report = {"gpu": torch.cuda.get_device_name(), "cases": []}
     for n, path in selected:

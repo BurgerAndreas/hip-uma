@@ -10,6 +10,7 @@ Train a frozen UMA-s-1.2 plus HIP head with resumable distributed checkpoints.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -50,6 +51,9 @@ def parse_args():
     p.add_argument("--resume", type=Path)
     p.add_argument("--feature-cache", type=Path)
     p.add_argument("--tf32", action="store_true")
+    p.add_argument("--compile-head", action="store_true")
+    p.add_argument("--stop-file", type=Path)
+    p.add_argument("--refresh-data-every", type=int, default=2000)
     return p.parse_args()
 
 
@@ -76,12 +80,20 @@ def main():
     frozen_hash = parameter_hash(model.backbone)
     torch.backends.cuda.matmul.allow_tf32 = args.tf32
     cache_root = (
-        args.feature_cache / (frozen_hash + ("-tf32" if args.tf32 else "-fp32"))
+        args.feature_cache
+        / (frozen_hash + ("-tf32" if args.tf32 else "-fp32") + "-geometry1")
         if args.feature_cache
         else None
     )
     cache_writer = FeatureCacheWriter(cache_root) if cache_root else None
     head = model.head
+    if args.compile_head:
+        torch._dynamo.config.recompile_limit = 16
+        for block in head.blocks:
+            block.compile(dynamic=True)
+        head.edge_readout.forward_messages = torch.compile(
+            head.edge_readout.forward_messages, dynamic=True
+        )
     optimizer = torch.optim.AdamW(
         head.parameters(), lr=args.lr, weight_decay=1e-4, fused=True
     )
@@ -100,6 +112,23 @@ def main():
             head, device_ids=[local], broadcast_buffers=False
         )
 
+    def synchronized_inventory():
+        # Partition one immutable list on every rank while downloads add files.
+        entries = (
+            [
+                str(p.relative_to(args.data))
+                for p in sorted(args.data.glob("shards/*/*.verified.json"))
+            ]
+            if rank == 0
+            else None
+        )
+        message = [entries]
+        if world > 1:
+            dist.broadcast_object_list(message, src=0, device=device)
+        return message[0]
+
+    inventory = synchronized_inventory()
+
     def loader(split):
         worker_count = args.workers if split == "train" else 0
         stream = HessianStream(
@@ -112,6 +141,7 @@ def main():
             split=split,
             max_passes=1 if split == "val" else None,
             feature_cache=cache_root,
+            markers=inventory,
         )
         kw = (
             {
@@ -184,6 +214,10 @@ def main():
             "dataset_revision": "7ce83e7425649619c9f85dad485bb2cfd7ee12bd",
             "head_precision": args.head_precision,
             "tf32": args.tf32,
+            "available_shards": len(inventory),
+            "inventory_sha256": hashlib.sha256(
+                "\n".join(inventory).encode()
+            ).hexdigest(),
             "seed": args.seed,
             "world_size": world,
             "loss": "structure_mean_mse_eV2_Angstrom4",
@@ -206,9 +240,7 @@ def main():
             head_parameters=sum(p.numel() for p in head.parameters()),
             world_size=world,
             validation="deterministic_parent_index_1pct",
-            available_shards_at_start=sum(
-                1 for _ in args.data.glob("shards/*/*.verified.json")
-            ),
+            available_shards_at_start=len(inventory),
         )
         (args.output / "config.json").write_text(
             json.dumps(public_config, indent=2) + "\n"
@@ -217,6 +249,13 @@ def main():
     try:
         while step < args.steps:
             if time.monotonic() - started >= args.duration:
+                stopping = True
+            if (
+                rank == 0
+                and step % args.log_every == 0
+                and args.stop_file
+                and args.stop_file.exists()
+            ):
                 stopping = True
             stop = torch.tensor(int(stopping), device=device)
             if world > 1:
@@ -317,6 +356,25 @@ def main():
                     )
                 model.train()
                 window = time.monotonic()
+            if args.refresh_data_every and step % args.refresh_data_every == 0:
+                updated = synchronized_inventory()
+                if updated != inventory:
+                    if args.workers:
+                        train_iter._shutdown_workers()
+                    inventory = updated
+                    train_loader = loader("train")
+                    train_iter = iter(train_loader)
+                    if rank == 0:
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "data_inventory_refresh",
+                                    "step": step,
+                                    "verified_shards": len(inventory),
+                                }
+                            ),
+                            flush=True,
+                        )
     finally:
         # Stop the infinite loader before interpreter and CUDA teardown. Held-out
         # evaluation is bounded and uses the main process rather than abandoned

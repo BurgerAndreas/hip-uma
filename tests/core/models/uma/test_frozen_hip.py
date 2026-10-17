@@ -48,6 +48,32 @@ def test_validation_membership_is_stable_and_disjoint():
     assert not set(indices[mask]) & set(indices[~mask])
 
 
+def test_vectorized_centering_matches_ase_teacher_inputs():
+    from ase import Atoms
+
+    from fairchem.core.datasets.atomic_data import AtomicData
+
+    positions = np.array(
+        [[1000.0, -800.0, 2.0], [1000.7, -800.0, 2.0], [1000.0, -799.3, 2.0]],
+        dtype=np.float32,
+    )
+    values = {
+        "natoms": np.array([3]),
+        "atomic_numbers": np.array([8, 1, 1]),
+        "coords": positions,
+        "hessian_flat": np.zeros(81, dtype=np.float32),
+        "charge": np.array([0]),
+        "spin": np.array([1]),
+        "omol_index": np.array([7]),
+    }
+    batch = make_batch(values, np.array([0]))
+    atoms = Atoms(numbers=[8, 1, 1], positions=positions.astype(np.float64))
+    atoms.info.update(charge=0, spin=1)
+    reference = AtomicData.from_ase(atoms, task_name="omol", molecule_cell_size=120.0)
+    torch.testing.assert_close(batch.pos, reference.pos, rtol=0, atol=0)
+    torch.testing.assert_close(batch.cell, reference.cell, rtol=0, atol=0)
+
+
 def test_mixed_shard_uses_atom_and_hessian_pointers():
     values = {
         "natoms": np.array([2, 3, 2]),
@@ -121,3 +147,48 @@ def test_ragged_graph_preserves_reference_order_and_position_gradients():
     actual_grad = torch.autograd.grad(distance.sum(), pos, retain_graph=True)[0]
     expected_grad = torch.autograd.grad(reference.sum(), pos)[0]
     torch.testing.assert_close(actual_grad, expected_grad)
+
+
+def test_fixed_inventory_keeps_rank_samples_disjoint_during_downloads(tmp_path):
+    import json
+
+    import h5py
+
+    from fairchem.core.frozen_hip.data import HessianStream
+
+    candidate = np.arange(1000, dtype=np.int64)
+    indices = candidate[~validation_mask(candidate)][:32]
+    markers = []
+    for sid in range(16):
+        name = f"shards/00/shard_{sid:05d}.h5"
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, "w") as f:
+            f.attrs.update(
+                complete=True, model="uma-s-1p2", hessian_unit="eV/Angstrom^2"
+            )
+            values = {
+                "natoms": np.array([2, 2]),
+                "atom_ptr": np.array([0, 2, 4]),
+                "hessian_ptr": np.array([0, 36, 72]),
+                "atomic_numbers": np.ones(4, dtype=np.int16),
+                "coords": np.arange(12, dtype=np.float32).reshape(4, 3),
+                "hessian_flat": np.zeros(72, dtype=np.float32),
+                "charge": np.zeros(2, dtype=np.int32),
+                "spin": np.ones(2, dtype=np.int32),
+                "omol_index": indices[sid * 2 : sid * 2 + 2],
+            }
+            for key, value in values.items():
+                f[key] = value
+        marker = path.with_suffix(".verified.json")
+        marker.write_text(json.dumps({"path": name, "sha256": "a" * 64}))
+        markers.append(str(marker.relative_to(tmp_path)))
+    streams = [
+        HessianStream(tmp_path, rank=rank, world=4, markers=markers, max_passes=1)
+        for rank in range(4)
+    ]
+    # A new marker must not change a rank's partition until coordinated refresh.
+    (tmp_path / "shards/00/shard_99999.verified.json").write_text("{}")
+    sets = [{int(sid) for batch in stream for sid in batch.sid} for stream in streams]
+    assert set.union(*sets) == set(indices.tolist())
+    assert sum(map(len, sets)) == len(set.union(*sets))

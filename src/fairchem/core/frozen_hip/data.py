@@ -46,11 +46,17 @@ def make_batch(values, rows):
         labels = np.concatenate(
             [values["hessian_flat"][hp[r] : hp[r + 1]] for r in rows]
         )
-    # No periodic images are used for the molecular teacher or student.
+    # Match ASE teacher centering in float64 before conversion to FP32.
+    centered = coords.reshape(b, n, 3).astype(np.float64)
+    minimum = centered.min(axis=1, keepdims=True)
+    extent = centered.max(axis=1) - minimum[:, 0, :]
+    centered = (centered - minimum + 120.0).astype(np.float32)
+    cells = np.zeros((b, 3, 3), dtype=np.float32)
+    cells[:, np.arange(3), np.arange(3)] = extent + 240.0
     return AtomicData(
-        pos=torch.from_numpy(coords.copy()),
+        pos=torch.from_numpy(centered.reshape(-1, 3)),
         atomic_numbers=torch.from_numpy(numbers.astype(np.int64)),
-        cell=torch.eye(3).repeat(b, 1, 1) * 120,
+        cell=torch.from_numpy(cells),
         pbc=torch.zeros(b, 3, dtype=torch.bool),
         natoms=torch.full((b,), n, dtype=torch.long),
         edge_index=torch.empty(2, 0, dtype=torch.long),
@@ -82,6 +88,7 @@ class HessianStream(IterableDataset):
         split="train",
         max_passes=None,
         feature_cache=None,
+        markers=None,
     ):
         super().__init__()
         self.root = Path(root)
@@ -89,6 +96,7 @@ class HessianStream(IterableDataset):
         self.pair_budget, self.max_batch = pair_budget, max_batch
         self.split, self.max_passes = split, max_passes
         self.feature_cache = feature_cache
+        self.markers = markers
 
     def __iter__(self):
         worker = get_worker_info()
@@ -96,7 +104,11 @@ class HessianStream(IterableDataset):
         pass_id = 0
         while self.max_passes is None or pass_id < self.max_passes:
             # Immutable verified markers allow downloads to add complete shards.
-            markers = sorted(self.root.glob("shards/*/*.verified.json"))
+            markers = (
+                [self.root / p for p in self.markers]
+                if self.markers is not None
+                else sorted(self.root.glob("shards/*/*.verified.json"))
+            )
             if len(markers) < self.world * workers:
                 raise RuntimeError("Too few verified shards for the loader ranks")
             rng = random.Random(self.seed + pass_id)
