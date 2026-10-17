@@ -45,16 +45,24 @@ def main():
     parser.add_argument("--feature-cache", type=Path)
     parser.add_argument("--targets-only", action="store_true")
     parser.add_argument("--grouped-mole", action="store_true")
+    parser.add_argument("--fused-backbone", action="store_true")
     parser.add_argument(
         "--backbone-precision", choices=("fp32", "fp16"), default="fp32"
     )
+    parser.add_argument("--backbone-graph-version", type=int, choices=(1, 2), default=2)
     parser.add_argument("--max-atoms", type=int, default=4096)
     args = parser.parse_args()
     if args.group_shards < 1 or not 0 <= args.rank < args.world:
         raise ValueError("Require positive shard groups and a valid worker rank")
     args.output.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(2)
-    model = None if args.targets_only else FrozenHIP("cuda").eval()
+    model = (
+        None
+        if args.targets_only
+        else FrozenHIP(
+            "cuda", backbone_graph_version=args.backbone_graph_version
+        ).eval()
+    )
     if model is not None:
         del model.head
     frozen = parameter_hash(model.backbone) if model is not None else None
@@ -62,6 +70,10 @@ def main():
         from fairchem.core.frozen_hip.grouped_mole import enable_grouped_mole
 
         enable_grouped_mole(model.backbone)
+    if model is not None and args.fused_backbone:
+        from fairchem.core.frozen_hip.rotations import enable_fused_rotations
+
+        enable_fused_rotations(model.backbone)
     torch.backends.cuda.matmul.allow_tf32 = True
     markers = sorted(args.data.glob("shards/*/*.verified.json"))
     if not markers:
@@ -94,6 +106,10 @@ def main():
         )
         if not args.targets_only:
             identity["grouped_mole"] = args.grouped_mole
+            if args.fused_backbone:
+                identity["fused_backbone"] = True
+            if args.backbone_graph_version != 2:
+                identity["backbone_graph_version"] = args.backbone_graph_version
         fingerprint = hashlib.sha256(
             json.dumps(identity, sort_keys=True).encode()
         ).hexdigest()
@@ -121,6 +137,8 @@ def main():
                     + "-tf32-geometry1"
                     + ("-backbonefp16" if args.backbone_precision == "fp16" else "")
                     + ("-grouped" if args.grouped_mole else "")
+                    + ("-radius1" if args.backbone_graph_version == 1 else "")
+                    + ("-fusedbody" if args.fused_backbone else "")
                 )
                 if args.feature_cache and not args.targets_only
                 else None

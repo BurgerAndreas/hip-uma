@@ -266,3 +266,13 @@ This includes:
   graph reshapes need the normal compiler path.
 - Validation MAE needs the original asymmetric labels. Keep dense labels in
   the fixed-cohort cache; triangular labels plus a constant preserve MSE only.
+
+- `AtomicData` needs its own `pin_memory` method. PyTorch otherwise leaves this
+  custom batch class unpinned, even when DataLoader requests pinned memory.
+- Nonperiodic molecules can spend substantial CPU time in periodic grid setup.
+  Compare the vectorized radius builder under the same cutoff and neighbor cap.
+- Frozen expert contractions return interleaved batch strides. Packing FP16
+  weights once can be much faster than strided loads in each grouped GEMM tile.
+- Block RMSE ignores the antisymmetric MSE constant. Use explicit symmetrized
+  targets and record the objective in checkpoints. Do not mix optimizer states
+  across loss changes during normal training.

@@ -754,6 +754,12 @@ class AtomicData:
         r"""Performs tensor dtype and/or device conversion for all tensor attributes"""
         return self.apply(lambda x: x.to(device, **kwargs))
 
+    def pin_memory(self):
+        """
+        Pin tensor storage so DataLoader can stage asynchronous device copies.
+        """
+        return self.apply(lambda value: value.pin_memory())
+
     def cpu(self):
         r"""Copies all tensor attributes to CPU memory."""
         return self.apply(lambda x: x.cpu())

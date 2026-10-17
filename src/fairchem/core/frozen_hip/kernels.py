@@ -198,3 +198,122 @@ def fused_block_mse(edge, node, data):
         data.hip_edge_ptr,
         data.hip_pair_ptr,
     )
+
+
+@triton.jit
+def _block_norm_loss(
+    PRED,
+    TARGET,
+    AP,
+    EP,
+    PP,
+    GRAD,
+    PARTIAL,
+    COUNT,
+    B,
+    NODE: tl.constexpr,
+    BLOCK: tl.constexpr,
+    LEVELS: tl.constexpr,
+):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    k = tl.arange(0, 16)
+    mask = (index[:, None] < COUNT) & (k[None, :] < 9)
+    if NODE:
+        sample = _owner(index, AP, B, LEVELS)
+        row, col = k // 3, k % 3
+        low, high = tl.minimum(row, col), tl.maximum(row, col)
+        upper = low * 3 - low * (low - 1) // 2 + high - low
+        reverse_index = index[:, None] * 9 + (col * 3 + row)[None, :]
+        target_index = index[:, None] * 6 + upper[None, :]
+    else:
+        sample = _owner(index, EP, B, LEVELS)
+        n = tl.load(AP + sample + 1) - tl.load(AP + sample)
+        base = tl.load(EP + sample)
+        local = index - base
+        width = tl.maximum(n - 1, 1)
+        j, i = local // width, local % width
+        i += i >= j
+        reverse = base + i * width + j - (j > i)
+        kt = (k % 3) * 3 + k // 3
+        reverse_index = reverse[:, None] * 9 + kt[None, :]
+        low, high = tl.minimum(i, j), tl.maximum(i, j)
+        pair = high * (high - 1) // 2 + low
+        canonical_k = tl.where(i[:, None] < j[:, None], k[None, :], kt[None, :])
+        target_index = tl.load(PP + sample)[:, None] + pair[:, None] * 9 + canonical_k
+    value = tl.load(PRED + index[:, None] * 9 + k[None, :], mask, 0).to(tl.float32)
+    value += tl.load(PRED + reverse_index, mask, 0).to(tl.float32)
+    error = value - tl.load(TARGET + target_index, mask, 0).to(tl.float32)
+    error = tl.where(mask, error, 0)
+    scale = tl.max(tl.abs(error), 1)
+    scaled = error / tl.where(scale > 0, scale, 1)[:, None]
+    norm = tl.sqrt(tl.sum(scaled * scaled, 1))
+    n = tl.load(AP + sample + 1) - tl.load(AP + sample)
+    weight = 1.0 / (B * n * n)
+    grad = scaled * (2.0 * weight / (3.0 * tl.where(norm > 0, norm, 1)))[:, None]
+    tl.store(GRAD + index[:, None] * 9 + k[None, :], grad, mask)
+    loss = (scale / 3.0) * norm * weight
+    tl.store(PARTIAL + tl.program_id(0), tl.sum(tl.where(index < COUNT, loss, 0)))
+
+
+class _BlockRMSE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, edge, node, targets, diagonal, ap, ep, pp):
+        edge, node = edge.contiguous(), node.contiguous()
+        ge = torch.empty_like(edge, dtype=torch.float32)
+        gn = torch.empty_like(node, dtype=torch.float32)
+        partials = []
+        b = ap.numel() - 1
+        for values, labels, gradient, is_node in (
+            (edge, targets, ge, False),
+            (node, diagonal, gn, True),
+        ):
+            count = values.shape[0]
+            partial = values.new_empty(triton.cdiv(count, 64), dtype=torch.float32)
+            if count:
+                _block_norm_loss[(partial.numel(),)](
+                    values,
+                    labels,
+                    ap,
+                    ep,
+                    pp,
+                    gradient,
+                    partial,
+                    count,
+                    b,
+                    is_node,
+                    64,
+                    (b + 1).bit_length(),
+                    num_warps=4,
+                )
+            partials.append(partial.sum())
+        ctx.save_for_backward(ge, gn)
+        ctx.edge_dtype, ctx.node_dtype = edge.dtype, node.dtype
+        return partials[0] + partials[1]
+
+    @staticmethod
+    def backward(ctx, gradient):
+        ge, gn = ctx.saved_tensors
+        return (
+            ge.mul(gradient).to(ctx.edge_dtype),
+            gn.mul(gradient).to(ctx.node_dtype),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+def fused_block_rmse(edge, node, data):
+    """
+    Compute block norms and first derivatives without dense Hessian assembly.
+    """
+    return _BlockRMSE.apply(
+        edge,
+        node,
+        data.hip_pair_targets,
+        data.hip_diagonal_targets,
+        data.hip_atom_ptr,
+        data.hip_edge_ptr,
+        data.hip_pair_ptr,
+    )

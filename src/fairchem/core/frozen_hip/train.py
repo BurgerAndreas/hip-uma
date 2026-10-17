@@ -26,8 +26,9 @@ from torch.utils.data import DataLoader
 
 from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter
 from fairchem.core.frozen_hip.data import HessianStream
+from fairchem.core.frozen_hip.losses import structure_block_rmse
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
-from fairchem.core.frozen_hip.packed import PackedHessianStream, block_mse
+from fairchem.core.frozen_hip.packed import PackedHessianStream, block_mse, block_rmse
 from fairchem.core.frozen_hip.precision import configure_head_precision
 from fairchem.core.frozen_hip.rotations import enable_fused_rotations
 from fairchem.core.frozen_hip.validation import (
@@ -45,7 +46,11 @@ def parse_args():
     p.add_argument("--steps", type=int, default=200000)
     p.add_argument("--duration", type=float, default=13200)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--loss", choices=("mse", "block-rmse"), default="mse")
+    p.add_argument("--profile-steps", type=int, default=0)
+    p.add_argument("--profile-after", type=int, default=100)
     p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
         "--pair-budget",
         type=int,
@@ -91,9 +96,11 @@ def parse_args():
     p.add_argument("--packed-data", type=Path)
     p.add_argument("--fused-rotations", action="store_true")
     p.add_argument("--grouped-mole", action="store_true")
+    p.add_argument("--fused-backbone", action="store_true")
     p.add_argument("--block-so2", action="store_true")
     p.add_argument("--projected-readout", action="store_true")
     p.add_argument("--backbone-precision", choices=("fp32", "fp16"), default="fp32")
+    p.add_argument("--backbone-graph-version", type=int, choices=(1, 2), default=2)
     p.add_argument("--tf32", action="store_true")
     p.add_argument("--compile-head", action="store_true")
     p.add_argument("--stop-file", type=Path)
@@ -110,6 +117,29 @@ def main():
     cohort = load_manifest(cohort_path)
     if args.eval_only and not (args.output / "latest.pt").exists():
         raise FileNotFoundError("Final evaluation requires the last saved checkpoint")
+    evaluation_state = None
+    if args.eval_only:
+        evaluation_state = torch.load(
+            args.output / "latest.pt", map_location="cpu", weights_only=False
+        )
+        args.layers = evaluation_state.get("head_layers", args.layers)
+        for key, default in (
+            ("loss_name", "mse"),
+            ("head_precision", "fp32"),
+            ("backbone_precision", "fp32"),
+            ("backbone_graph_version", 2),
+            ("tf32", False),
+            ("grouped_mole", False),
+            ("block_so2", False),
+            ("projected_readout", False),
+            ("fused_rotations", False),
+            ("fused_backbone", False),
+        ):
+            setattr(
+                args,
+                "loss" if key == "loss_name" else key,
+                evaluation_state.get(key, default),
+            )
     rank = int(os.environ.get("RANK", 0))
     world = int(os.environ.get("WORLD_SIZE", 1))
     local = int(os.environ.get("LOCAL_RANK", 0))
@@ -135,8 +165,11 @@ def main():
         layers=args.layers,
         execution_mode=args.execution_mode,
         checkpoint_edges=args.checkpoint_edges,
+        backbone_graph_version=args.backbone_graph_version,
     )
     frozen_hash = parameter_hash(model.backbone)
+    if args.fused_backbone:
+        enable_fused_rotations(model.backbone)
     if args.grouped_mole:
         from fairchem.core.frozen_hip.grouped_mole import enable_grouped_mole
 
@@ -154,6 +187,8 @@ def main():
             + "-geometry1"
             + ("-backbonefp16" if args.backbone_precision == "fp16" else "")
             + ("-grouped" if args.grouped_mole else "")
+            + ("-radius1" if args.backbone_graph_version == 1 else "")
+            + ("-fusedbody" if args.fused_backbone else "")
         )
         if args.feature_cache
         else None
@@ -198,7 +233,11 @@ def main():
         else args.resume or args.output / "latest.pt"
     )
     if resume.exists():
-        state = torch.load(resume, map_location=device, weights_only=False)
+        state = (
+            evaluation_state
+            if args.eval_only
+            else torch.load(resume, map_location=device, weights_only=False)
+        )
         if state["backbone_sha256"] != frozen_hash:
             raise ValueError("Checkpoint backbone differs from the frozen UMA model")
         if state.get("validation_sample_ids_sha256") not in (
@@ -206,8 +245,16 @@ def main():
             cohort["sample_ids_sha256"],
         ):
             raise ValueError("Checkpoint evaluation cohort differs from this run")
+        saved_loss = state.get("loss_name", "mse")
+        if args.eval_only:
+            args.loss = saved_loss
+        elif saved_loss != args.loss and not args.benchmark:
+            raise ValueError(
+                "Checkpoint loss differs; use a separate output for a new loss"
+            )
         head.load_state_dict(state["head"])
-        optimizer.load_state_dict(state["optimizer"])
+        if not args.eval_only:
+            optimizer.load_state_dict(state["optimizer"])
         step = state["step"]
     if world > 1:
         # Synchronize the small trainable head, never the frozen backbone.
@@ -248,6 +295,8 @@ def main():
                 markers=inventory,
                 backbone_sha256=frozen_hash,
                 backbone_precision=args.backbone_precision,
+                backbone_graph_version=args.backbone_graph_version,
+                fused_backbone=args.fused_backbone,
                 tf32=args.tf32,
                 grouped_mole=args.grouped_mole,
                 window_files=args.window_shards,
@@ -277,7 +326,13 @@ def main():
             if args.workers
             else {}
         )
-        return DataLoader(stream, batch_size=None, num_workers=args.workers, **kw)
+        return DataLoader(
+            stream,
+            batch_size=None,
+            num_workers=args.workers,
+            pin_memory=args.pin_memory,
+            **kw,
+        )
 
     train_loader = None if args.eval_only else loader()
     train_iter = iter(train_loader) if train_loader is not None else None
@@ -292,19 +347,47 @@ def main():
     started = time.monotonic()
     window = started
     metrics = torch.zeros(5, device=device, dtype=torch.float64)
+    host_metrics = [0, 0, 0, 0]
     total_samples = 0
     model.train()
 
+    profiler = None
+    phase = nullcontext
+    if args.profile_steps:
+        if args.profile_steps < 0 or args.profile_after < 0:
+            raise ValueError("Profile step limits must be nonnegative")
+        from torch.profiler import ProfilerActivity, profile, record_function, schedule
+
+        def write_trace(trace):
+            trace.export_chrome_trace(str(args.output / f"profile-rank{rank}.json"))
+            (args.output / f"profile-rank{rank}.txt").write_text(
+                trace.key_averages().table(sort_by="self_cpu_time_total", row_limit=80)
+            )
+
+        profiler = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=schedule(
+                wait=args.profile_after, warmup=1, active=args.profile_steps, repeat=1
+            ),
+            on_trace_ready=write_trace,
+        )
+        phase = record_function
+        profiler.start()
+
     def move(data):
         sizes = data.natoms.tolist()
-        data.to(device, non_blocking=True)
+        pbc = data.pbc
+        # These boolean flags only control Python branches in graph generation.
+        data.apply(
+            lambda value: value if value is pbc else value.to(device, non_blocking=True)
+        )
         data.hip_sizes = sizes
         data.hip_fused_loss = args.fused_rotations
         return data
 
     def predict(data):
         # Frozen inference can use FP16; the head receives FP32 features.
-        with torch.no_grad():
+        with phase("frozen_backbone"), torch.no_grad():
             if hasattr(data, "hip_features"):
                 emb = {
                     "node_embedding": data.hip_features.float()
@@ -318,7 +401,7 @@ def main():
         from torch.utils.checkpoint import checkpoint
 
         def forward(x):
-            with torch.autocast(
+            with phase("hip_head"), torch.autocast(
                 "cuda", dtype=torch.bfloat16, enabled=args.head_precision == "bf16"
             ):
                 module = model.head if model.training else head
@@ -349,6 +432,8 @@ def main():
             "head_precision": args.head_precision,
             "tf32": args.tf32,
             "backbone_precision": args.backbone_precision,
+            "backbone_graph_version": args.backbone_graph_version,
+            "fused_backbone": args.fused_backbone,
             "grouped_mole": args.grouped_mole,
             "block_so2": args.block_so2,
             "projected_readout": args.projected_readout,
@@ -359,7 +444,15 @@ def main():
             ).hexdigest(),
             "seed": args.seed,
             "world_size": world,
-            "loss": "structure_mean_mse_eV2_Angstrom4",
+            "loss_name": args.loss,
+            "loss": (
+                "structure_mean_mse_eV2_Angstrom4"
+                if args.loss == "mse"
+                else "structure_mean_block_rmse_symmetrized_eV_Angstrom2"
+            ),
+            "training_targets": "symmetrized"
+            if args.loss == "block-rmse"
+            else "dense_original_mse",
             "global_batch_cap": args.max_batch,
             "global_atom_target": args.max_atoms,
             "sampler": "windowed_best_fit_atoms",
@@ -389,13 +482,14 @@ def main():
             max_atoms=args.max_atoms // world,
             pair_budget=args.microbatch_pairs,
         )
-        val = torch.zeros(3, device=device, dtype=torch.float64)
+        val = torch.zeros(4, device=device, dtype=torch.float64)
         seen = []
         with torch.no_grad():
             val_loader = DataLoader(
                 stream,
                 batch_size=None,
                 num_workers=args.workers,
+                pin_memory=args.pin_memory,
                 **(
                     {"multiprocessing_context": "spawn", "prefetch_factor": 2}
                     if args.workers
@@ -405,13 +499,16 @@ def main():
             for host_data in val_loader:
                 seen.extend(int(sid) for sid in host_data.sid)
                 data = move(host_data)
-                error = predict(data).float().reshape(-1) - data.hessian
+                prediction = predict(data).float().reshape(-1)
+                error = prediction - data.hessian
                 parts = error.split([9 * n * n for n in data.hip_sizes])
                 val += torch.stack(
                     (
                         torch.stack([part.square().mean() for part in parts]).sum(),
                         torch.stack([part.abs().mean() for part in parts]).sum(),
                         error.new_tensor(len(data.hip_sizes)),
+                        structure_block_rmse(prediction, data.hessian, data.hip_sizes)
+                        * len(data.hip_sizes),
                     )
                 ).double()
         identities = [seen]
@@ -432,8 +529,10 @@ def main():
             row = dict(
                 event="final_evaluation" if final else "validation",
                 step=step,
+                loss_name=args.loss,
                 mse=values[0] / values[2],
                 mae=values[1] / values[2],
+                block_rmse=values[3] / values[2],
                 samples=int(values[2]),
                 sample_ids_sha256=fingerprint,
                 from_last_checkpoint=final,
@@ -478,20 +577,25 @@ def main():
                 and args.stop_file.exists()
             ):
                 stopping = True
-            stop = torch.tensor(int(stopping), device=device)
             if world > 1:
+                stop = torch.tensor(int(stopping), device=device)
                 dist.all_reduce(stop, op=dist.ReduceOp.MAX)
-            if stop.item():
+                should_stop = bool(stop.item())
+            else:
+                should_stop = stopping
+            if should_stop:
                 break
-            host_batches = next(train_iter)
+            with phase("data_load"):
+                host_batches = next(train_iter)
             local_count = sum(len(data.natoms) for data in host_batches)
-            count = torch.tensor(local_count, device=device, dtype=torch.float32)
+            count = local_count
             if world > 1:
+                count = torch.tensor(local_count, device=device, dtype=torch.float32)
                 dist.all_reduce(count)
             optimizer.zero_grad(set_to_none=True)
-            batch_metrics = torch.zeros_like(metrics)
             for micro_index, host_data in enumerate(host_batches):
-                data = move(host_data)
+                with phase("device_transfer"):
+                    data = move(host_data)
                 b = len(data.hip_sizes)
                 # Only the last microbatch synchronizes gradients. Every molecule
                 # keeps its weight in the same global optimizer batch.
@@ -502,41 +606,53 @@ def main():
                 )
                 with context:
                     prediction = predict(data)
-                    loss = (
-                        block_mse(
-                            prediction["edge_blocks"], prediction["node_blocks"], data
-                        )
-                        if hasattr(data, "hip_pair_targets")
-                        else structure_mse(prediction, data.hessian, data.hip_sizes)
-                    )
-                    (loss * (b * world / count)).backward()
-                batch_metrics += torch.stack(
-                    (
-                        loss.detach().double() * b,
-                        count.new_tensor(b).double(),
-                        count.new_tensor(sum(data.hip_sizes)).double(),
-                        count.new_tensor(
-                            b if hasattr(data, "hip_features") else 0
-                        ).double(),
-                        count.new_tensor(1).double(),
-                    )
-                )
+                    with phase("hessian_loss"):
+                        if hasattr(data, "hip_pair_targets"):
+                            loss_function = (
+                                block_mse if args.loss == "mse" else block_rmse
+                            )
+                            loss = loss_function(
+                                prediction["edge_blocks"],
+                                prediction["node_blocks"],
+                                data,
+                            )
+                        else:
+                            loss_function = (
+                                structure_mse
+                                if args.loss == "mse"
+                                else structure_block_rmse
+                            )
+                            loss = loss_function(
+                                prediction, data.hessian, data.hip_sizes
+                            )
+                    with phase("head_backward"):
+                        (loss * (b * world / count)).backward()
+                with phase("batch_metrics"):
+                    metrics[0].add_(loss.detach(), alpha=b)
+                    host_metrics[0] += b
+                    host_metrics[1] += sum(data.hip_sizes)
+                    host_metrics[2] += b if hasattr(data, "hip_features") else 0
+                    host_metrics[3] += 1
                 host_batches[micro_index] = None
                 del prediction, loss, data, host_data
-            torch.nn.utils.clip_grad_norm_(
-                head.parameters(), max_norm=10.0, error_if_nonfinite=True
-            )
+            with phase("grad_clip"):
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), max_norm=10.0, error_if_nonfinite=True
+                )
             warmup = min(1.0, (step + 1) / 500)
             progress = max(0.0, (step - 500) / max(1, args.steps - 500))
             lr = args.lr * warmup * (0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2)
             for group in optimizer.param_groups:
                 group["lr"] = lr
-            optimizer.step()
+            with phase("optimizer_step"):
+                optimizer.step()
+            if profiler is not None:
+                profiler.step()
             step += 1
             total_samples += local_count
-            metrics += batch_metrics
             if step % args.log_every == 0:
                 torch.cuda.synchronize()
+                metrics[1:].copy_(torch.tensor(host_metrics, dtype=torch.float64))
                 if world > 1:
                     dist.all_reduce(metrics)
                 elapsed = time.monotonic() - window
@@ -551,7 +667,9 @@ def main():
                         "mean_global_batch": values[1] / args.log_every,
                         "mean_global_atoms": values[2] / args.log_every,
                         "step": step,
-                        "mse": values[0] / values[1],
+                        "loss_name": args.loss,
+                        ("mse" if args.loss == "mse" else "block_rmse"): values[0]
+                        / values[1],
                         "samples_s": values[1] / elapsed,
                         "atoms_s": values[2] / elapsed,
                         "lr": lr,
@@ -563,6 +681,7 @@ def main():
                     with (args.output / "metrics.jsonl").open("a") as f:
                         f.write(json.dumps(row) + "\n")
                 metrics.zero_()
+                host_metrics = [0, 0, 0, 0]
                 window = time.monotonic()
             if step % args.checkpoint_every == 0:
                 save()
@@ -595,6 +714,8 @@ def main():
                             flush=True,
                         )
     finally:
+        if profiler is not None:
+            profiler.stop()
         # Stop the infinite loader before interpreter and CUDA teardown. Held-out
         # evaluation is bounded and uses the main process rather than abandoned
         # multiprocessing prefetch queues.
@@ -615,6 +736,11 @@ def main():
         configure_head_precision(head, state.get("head_precision", "fp32"))
         args.head_precision = state.get("head_precision", "fp32")
         args.backbone_precision = state.get("backbone_precision", "fp32")
+        args.backbone_graph_version = state.get("backbone_graph_version", 2)
+        model.backbone.radius_pbc_version = args.backbone_graph_version
+        enable_fused_rotations(
+            model.backbone, enabled=state.get("fused_backbone", False)
+        )
         if state.get("grouped_mole", False) or args.grouped_mole:
             from fairchem.core.frozen_hip.grouped_mole import enable_grouped_mole
 

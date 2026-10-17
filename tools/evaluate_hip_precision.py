@@ -37,6 +37,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--projected-readout", action="store_true")
+    parser.add_argument("--backbone-graph-version", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--fused-backbone", action="store_true")
     args = parser.parse_args()
     torch.set_num_threads(2)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -81,6 +83,12 @@ def main():
             for mode in metrics:
                 torch.cuda.synchronize()
                 timer = time.monotonic()
+                model.backbone.radius_pbc_version = (
+                    2 if mode == "fp32" else args.backbone_graph_version
+                )
+                enable_fused_rotations(
+                    model.backbone, enabled=args.fused_backbone and mode != "fp32"
+                )
                 enable_grouped_mole(model.backbone, enabled="grouped" in mode)
                 enable_fused_rotations(model.head, enabled=mode != "fp32")
                 enable_block_so2(model.head, enabled=mode != "fp32")
@@ -135,6 +143,8 @@ def main():
     result = dict(
         samples=len(seen),
         projected_readout=args.projected_readout,
+        backbone_graph_version=args.backbone_graph_version,
+        fused_backbone=args.fused_backbone,
         sample_ids_sha256=fingerprint,
         metrics=rows,
         prediction_relative_l2={

@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from fairchem.core.frozen_hip.model import structure_mse
@@ -180,3 +181,32 @@ def test_packed_windows_mix_sizes_and_cover_rows_once_across_ranks_and_workers(
     assert sorted(seen) == sorted(ids.tolist())
     assert mixed
     assert len(list(cache_root.glob("bundles/*.json"))) == 8
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        (dict(backbone_graph_version=1), "neighbor graph"),
+        (dict(fused_backbone=True), "backbone rotations"),
+    ],
+)
+def test_embedded_features_reject_changed_backbone_operations(
+    tmp_path, options, message
+):
+    from fairchem.core.frozen_hip.packed import PackedHessianStream
+
+    path = tmp_path / "bundle.hip"
+    write_packed(
+        path,
+        dict(features=np.zeros((1, 9, 4), dtype=np.float32)),
+        dict(backbone_sha256="frozen"),
+    )
+    stream = PackedHessianStream(
+        tmp_path,
+        markers=[path.name],
+        backbone_sha256="frozen",
+        max_passes=1,
+        **options,
+    )
+    with pytest.raises(ValueError, match=message):
+        next(iter(stream))

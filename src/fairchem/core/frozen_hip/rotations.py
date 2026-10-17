@@ -35,8 +35,12 @@ def enable_fused_rotations(module, enabled=True):
     """
     Change parameterless operation dispatch; retain every model parameter.
     """
-    backbone = getattr(module, "backbone", None)
-    if enabled and backbone is not None and (backbone.lmax != 2 or backbone.mmax != 2):
+    backbone = getattr(module, "backbone", module)
+    if (
+        enabled
+        and hasattr(backbone, "lmax")
+        and (backbone.lmax != 2 or backbone.mmax != 2)
+    ):
         raise ValueError("Fused rotations require lmax=mmax=2")
     backend = FusedRotationBackend() if enabled else ExecutionBackend()
     count = 0

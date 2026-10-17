@@ -24,17 +24,18 @@ from torch.utils.data import DataLoader
 
 from fairchem.core.frozen_hip.data import HessianStream
 from fairchem.core.frozen_hip.grouped_mole import enable_grouped_mole
+from fairchem.core.frozen_hip.losses import structure_block_rmse
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
 from fairchem.core.frozen_hip.packed import (
     arrays_from_batches,
     block_mse,
+    block_rmse,
     make_packed_batch,
     open_packed,
     write_packed,
 )
 from fairchem.core.frozen_hip.rotations import enable_fused_rotations
 from fairchem.core.frozen_hip.so2 import enable_block_so2
-from fairchem.core.models.uma.nn.execution_backends import ExecutionBackend
 
 
 class BenchmarkStream(HessianStream):
@@ -54,6 +55,9 @@ def main():
     parser.add_argument("--batches", type=int, default=24)
     parser.add_argument("--optimized-only", action="store_true")
     parser.add_argument("--projected-readout", action="store_true")
+    parser.add_argument("--loss", choices=("mse", "block-rmse"), default="mse")
+    parser.add_argument("--backbone-graph-version", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--fused-backbone", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(2)
@@ -161,12 +165,18 @@ def main():
                 ("float32", True, True, "fp32-block"),
                 ("float32", True, True, "online-fp16-block"),
                 ("float32", True, True, "online-fp32-grouped-block"),
+                ("float32", True, True, "online-fp16-grouped-block"),
             }
             cases = [case for case in cases if case in selected]
         for storage, fused, compiled, precision in cases:
             torch._dynamo.reset()
             model.head = copy.deepcopy(initial)
-            model.backbone.backend = ExecutionBackend()
+            model.backbone.radius_pbc_version = (
+                args.backbone_graph_version if fused else 2
+            )
+            enable_fused_rotations(
+                model.backbone, enabled=args.fused_backbone and fused
+            )
             enable_grouped_mole(model.backbone, enabled="grouped" in precision)
             if precision.endswith("-block"):
                 enable_block_so2(model.head)
@@ -193,7 +203,10 @@ def main():
             for index, source in enumerate(examples[storage]):
                 data = copy.deepcopy(source)
                 data.hip_sizes = data.natoms.tolist()
+                pbc = data.pbc
                 data.to("cuda")
+                if fused:
+                    data.pbc = pbc
                 data.hip_fused_loss = fused
                 emb = (
                     {
@@ -216,9 +229,13 @@ def main():
                     )
                 out = model.head(data, emb)
                 return (
-                    structure_mse(out["hessian"], data.hessian, data.hip_sizes)
+                    (structure_mse if args.loss == "mse" else structure_block_rmse)(
+                        out["hessian"], data.hessian, data.hip_sizes
+                    )
                     if storage == "dense"
-                    else block_mse(out["edge_blocks"], out["node_blocks"], data)
+                    else (block_mse if args.loss == "mse" else block_rmse)(
+                        out["edge_blocks"], out["node_blocks"], data
+                    )
                 )
 
             optimizer.zero_grad(set_to_none=True)
@@ -273,6 +290,13 @@ def main():
             seconds = time.monotonic() - started
             row = dict(
                 storage=storage,
+                loss_name=args.loss,
+                backbone_graph_version=model.backbone.radius_pbc_version
+                if precision.startswith("online-")
+                else None,
+                fused_backbone=args.fused_backbone
+                and fused
+                and precision.startswith("online-"),
                 fused=fused,
                 compiled=compiled,
                 precision=precision,

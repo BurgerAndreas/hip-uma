@@ -266,6 +266,47 @@ def block_mse(edge_blocks, node_blocks, data):
     return torch.stack(pair_sums).mean()
 
 
+def block_rmse(edge_blocks, node_blocks, data):
+    """
+    Average symmetrized-target block norms with equal geometry weights.
+    """
+    if edge_blocks.is_cuda and getattr(data, "hip_fused_loss", False):
+        from fairchem.core.frozen_hip.kernels import fused_block_rmse
+
+        return fused_block_rmse(edge_blocks, node_blocks, data)
+    from fairchem.core.frozen_hip.losses import block_rmse_values
+
+    losses, offset, atom_offset, target_offset = [], 0, 0, 0
+    lookup = torch.tensor([[0, 1, 2], [1, 3, 4], [2, 4, 5]], device=node_blocks.device)
+    for n in data.hip_sizes:
+        j, i = torch.tril_indices(n, n, offset=-1, device=edge_blocks.device)
+        first = offset + j * (n - 1) + i
+        reverse = offset + i * (n - 1) + j - 1
+        predicted = edge_blocks[first].float() + edge_blocks[reverse].float().transpose(
+            -1, -2
+        )
+        width = 9 * n * (n - 1) // 2
+        target = data.hip_pair_targets[target_offset : target_offset + width].reshape(
+            -1, 3, 3
+        )
+        nodes = node_blocks[atom_offset : atom_offset + n].float()
+        target_diag = data.hip_diagonal_targets[
+            atom_offset * 6 : (atom_offset + n) * 6
+        ].reshape(n, 6)[:, lookup]
+        diagonal = nodes + nodes.transpose(-1, -2)
+        losses.append(
+            (
+                2 * block_rmse_values(predicted - target).sum()
+                + block_rmse_values(diagonal - target_diag).sum()
+            )
+            / (n * n)
+        )
+        offset += n * (n - 1)
+        atom_offset += n
+        target_offset += width
+    return torch.stack(losses).mean()
+
+
 class PackedHessianStream(IterableDataset):
     """
     Stream memory-mapped training bundles with bounded quadratic GPU batches.
@@ -278,6 +319,8 @@ class PackedHessianStream(IterableDataset):
         markers,
         backbone_sha256,
         backbone_precision="fp32",
+        backbone_graph_version=2,
+        fused_backbone=False,
         tf32=True,
         grouped_mole=False,
         feature_cache=None,
@@ -296,6 +339,8 @@ class PackedHessianStream(IterableDataset):
         self.backbone_sha256 = backbone_sha256
         self.backbone_precision, self.tf32 = backbone_precision, tf32
         self.grouped_mole = grouped_mole
+        self.backbone_graph_version = backbone_graph_version
+        self.fused_backbone = fused_backbone
         self.feature_cache = feature_cache
         self.logical_pair_budget = logical_pair_budget
         if window_files < 1:
@@ -335,6 +380,17 @@ class PackedHessianStream(IterableDataset):
                         ):
                             raise ValueError(
                                 "Packed features use different inference precision"
+                            )
+                        if (
+                            header.get("backbone_graph_version", 2)
+                            != self.backbone_graph_version
+                        ):
+                            raise ValueError(
+                                "Packed features use a different neighbor graph"
+                            )
+                        if header.get("fused_backbone", False) != self.fused_backbone:
+                            raise ValueError(
+                                "Packed features use different backbone rotations"
                             )
                         if header.get("grouped_mole", False) != self.grouped_mole:
                             raise ValueError(

@@ -222,7 +222,8 @@ The following settings passed training benchmarks on one 80 GB GPU:
 python -m fairchem.core.frozen_hip.train \
   --data "$DATA_ROOT" --packed-data "$PACKED_ROOT" --output "$RUN_ROOT" \
   --workers 2 --max-batch 64 --max-atoms 2560 --microbatch-pairs 524288 \
-  --tf32 --backbone-precision fp16 --head-precision fp32 \
+  --loss block-rmse --tf32 --backbone-precision fp16 --head-precision fp32 \
+  --backbone-graph-version 1 --grouped-mole --fused-backbone \
   --fused-rotations --block-so2 --projected-readout --compile-head \
   --feature-cache "$FEATURE_CACHE_ROOT" --cache-memory-gb 16 \
   --validate-every 100000 --steps 200000
@@ -231,8 +232,9 @@ python -m fairchem.core.frozen_hip.train \
 The microbatch limit of 524,288 is specific to the tested 80 GB memory budget.
 The portable default remains 196,608. Four 350-atom molecules used 49.5 GB of
 allocated memory and 50.6 GB of reserved memory in a stress test.
-The normal training benchmark used 34.8 GB allocated and 36.2 GB reserved.
-The tested balanced batches required one microbatch per optimizer update.
+An earlier training benchmark used 34.8 GB allocated and 36.2 GB reserved.
+The current matched block-RMSE benchmark peaks at 47.1 GB allocated and
+48.8 GB reserved. Most updates use one microbatch; some require accumulation.
 Larger batches can still require accumulation.
 
 The default activation-checkpoint threshold now exceeds the microbatch pair
@@ -249,9 +251,11 @@ order. Deterministic mode uses the reference gradient path.
 before rotation. Both retain the original trainable parameters and optimizer
 state. Neither changes the head architecture.
 
-`--grouped-mole` provides an optional frozen FP32 inference kernel. It preserves
-composition-dependent expert routing. Ordinary FP16 inference was faster in the
-tested workload, so the recommended command omits this option.
+`--grouped-mole` preserves composition-dependent expert routing. FP16 inference
+packs merged expert weights into contiguous storage once per layer. This avoids
+repeated strided FP32 loads across row tiles. `--fused-backbone` also uses fused
+rotation kernels for frozen inference. The head has separate operation dispatch.
+All pretrained parameters remain frozen.
 
 ### Measured results
 
@@ -292,3 +296,112 @@ recommended feature cache stores FP32. Target Hessians always retain FP32.
 Use `--benchmark` with a separate output directory for bounded speed tests.
 Benchmark mode does not save checkpoints or run periodic validation. Production
 training remains a separate, explicit action.
+
+
+## Block RMSE objective
+
+Use `--loss block-rmse` for equal-geometry averaging of Cartesian block norms.
+For each geometry, the loss sums diagonal Frobenius norms and twice the
+independent off-diagonal Frobenius norms. It divides this sum by three times
+the squared atom count. It then averages across geometries.
+
+The inputs from the HIP head are raw directed blocks. Assembly adds each
+reverse transpose before calculating the error. Diagonal reconstruction includes
+all nine Cartesian components, even though storage keeps six independent entries.
+The fused CUDA path uses no molecule loop, dense Hessian assembly, or size padding.
+
+The objective uses symmetrized targets from the compact training files.
+The antisymmetric MSE constant does not apply to block RMSE. It is ignored for
+this objective. Source validation still reports original Cartesian MAE and MSE.
+It also reports block RMSE against symmetrized labels.
+All 10,027 original validation Hessians are exactly symmetric in the checked cohort.
+
+Norm reductions and gradients use FP32. The kernel rescales each error block
+before squaring to reduce overflow and underflow. It adds no epsilon.
+Exact agreement produces a zero loss and zero gradients.
+Tests cover unequal molecule sizes, diagonal weights, off-diagonal weights,
+rotation invariance, extreme scales, and agreement with dense block gradients.
+
+The default loss remains MSE for compatibility with existing runs.
+Use a separate output directory when changing the objective. The trainer rejects
+a checkpoint with a different loss during normal training. Benchmark mode permits
+that comparison without saving updates. Checkpoints record the objective and
+inference settings. Evaluation restores those settings before loading the model.
+
+## GPU idle time and profiling
+
+The original trace records 4,379 scalar extractions inside graph generation
+across eight optimizer updates. The grid graph builder loops over geometries and
+reads GPU scalars while building periodic-cell offsets. These molecules have no
+periodic boundaries. Most of that setup is unnecessary for this dataset.
+
+`--backbone-graph-version 1` selects the vectorized all-pairs radius builder.
+The cutoff and neighbor limit remain unchanged. Graph tests compare edge sets
+and displacement vectors, including neighbor pruning and 350-atom molecules.
+The all-pairs method uses quadratic work. The microbatch pair limit bounds this
+work for the supported dataset. The default graph version remains two.
+
+Pinned-memory loading now uses the custom `AtomicData.pin_memory` method.
+Without this method, PyTorch leaves this custom class unpinned.
+`--no-pin-memory` supports controlled comparisons. The trainer keeps periodicity
+flags on the CPU because graph generation uses them for Python branches.
+Single-GPU stop checks also stay on the CPU. Metric counts transfer only when
+logging. Multi-GPU sample weighting and coordinated stopping remain unchanged.
+
+Feature-cache namespaces include the graph version and frozen rotation backend.
+Embedded feature bundles reject mismatched settings. Existing target-only
+bundles remain compatible and require no conversion.
+
+Capture a bounded trace after compilation and warmup:
+
+```bash
+python -m fairchem.core.frozen_hip.train \
+  --data "$DATA_ROOT" --packed-data "$PACKED_ROOT" --output "$BENCHMARK_ROOT" \
+  --benchmark --loss block-rmse --duration 360 --profile-after 100 --profile-steps 8 \
+  --tf32 --backbone-precision fp16 --backbone-graph-version 1 \
+  --grouped-mole --fused-backbone --fused-rotations --block-so2 \
+  --projected-readout --compile-head
+python tools/summarize_hip_profile.py "$BENCHMARK_ROOT/profile-rank0.json"
+```
+
+The summary reports kernel activity, CPU phases, and scalar extractions.
+Phase times include nested operations. Profiling adds CPU overhead, so use
+unprofiled update times and GPU telemetry for final speed comparisons.
+GPU activity measures time with active kernels; it does not measure peak
+arithmetic efficiency. Small batches can still leave hardware unused.
+Keep raw traces private because they include runtime file paths.
+
+### Matched block-RMSE benchmark
+
+These results use one A100 80 GB GPU and the same optimizer updates,
+from step 12,200 through 12,720. Both runs use block RMSE and FP16 frozen
+inference. Their molecule counts and atom counts match at each logged window.
+The comparison excludes compilation and initial warmup. No frozen features
+come from cache in these windows.
+
+| Setup | Molecules/s | Seconds/update | Mean GPU activity | Median GPU activity |
+| --- | ---: | ---: | ---: | ---: |
+| Previous graph and expert dispatch | 186.9 | 0.2610 | 70.0% | 76% |
+| Vectorized graph, packed experts, fused body, pinned loader | 345.4 | 0.1413 | 88.4% | 95% |
+
+This is a 1.85 times throughput increase on the matched sequence.
+The bounded trace reduces kernel count from about 40,000 to 12,782 across
+eight updates. Graph scalar extractions fall from 4,379 to 234.
+The loader takes 0.48 ms across those updates in the optimized trace.
+A separate GPU-side finite-gradient check gives 343.2 molecules/s on the same
+sequence. It does not improve throughput, so the trainer retains its normal check.
+
+The combined frozen FP16 path also passes the full 10,027-sample evaluation.
+Against the original FP32 path, MAE changes from 0.23301611 to 0.23302137
+(0.0023%). Prediction relative L2 error is 0.0622%.
+Both evaluations use the same step-12,000 checkpoint and fixed sample identities.
+This checks inference accuracy; it does not establish equal training convergence.
+
+Small kernel launches and remaining graph scalar reads still create gaps.
+Balanced batches also vary in pair count and computation, even at similar
+atom counts. GPU activity therefore varies between batches. Activity above
+90% in many samples does not establish 90% arithmetic efficiency.
+
+At 0.1413 seconds per update, 200,000 updates need about 7.8 hours.
+This estimate excludes compilation, queue time, validation, and checkpoint I/O.
+Different molecular-size sequences and feature-cache hits change this estimate.

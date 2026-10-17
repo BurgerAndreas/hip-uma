@@ -33,7 +33,13 @@ class FrozenHIP(nn.Module):
     """Use the existing equivariant HIP architecture on frozen UMA features."""
 
     def __init__(
-        self, device, *, layers=1, execution_mode="general", checkpoint_edges=20000
+        self,
+        device,
+        *,
+        layers=1,
+        execution_mode="general",
+        checkpoint_edges=20000,
+        backbone_graph_version=None,
     ):
         super().__init__()
         settings = InferenceSettings(
@@ -46,6 +52,8 @@ class FrozenHIP(nn.Module):
         )
         original = getattr(predictor.model, "module", predictor.model)
         self.backbone = original.backbone.to(device).eval().requires_grad_(False)
+        if backbone_graph_version is not None:
+            self.backbone.radius_pbc_version = backbone_graph_version
         self.backbone.regress_config.forces = False
         self.backbone.regress_config.stress = False
         self.backbone.regress_config.hessian = False

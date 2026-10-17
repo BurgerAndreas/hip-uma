@@ -100,7 +100,11 @@ def grouped_linear(x, weights, bias, globals_):
         )
         tile_counts = triton.cdiv(sizes.long() * factor, 32)
         tiles = torch.cat((torch.zeros(1, dtype=torch.int64), tile_counts.cumsum(0)))
-        previous[1][factor] = (rows.to(x.device), tiles.to(x.device), int(tiles[-1]))
+        previous[1][factor] = (
+            rows.to(x.device, non_blocking=True),
+            tiles.to(x.device, non_blocking=True),
+            int(tiles[-1]),
+        )
     rows, tiles, count = previous[1][factor]
     half = (
         torch.is_autocast_enabled("cuda")
@@ -108,6 +112,11 @@ def grouped_linear(x, weights, bias, globals_):
     )
     if torch.is_autocast_enabled("cuda") and not half:
         raise ValueError("Use FP32 or FP16 with grouped frozen experts")
+    if half:
+        flat = flat.to(torch.float16)
+        # Expert contraction returns interleaved batch strides. Pack once rather
+        # than repeating strided FP32 loads and casts in every row tile.
+        weights = weights.to(dtype=torch.float16, memory_format=torch.contiguous_format)
     out = torch.empty(
         (*x.shape[:-1], weights.shape[1]),
         device=x.device,

@@ -170,3 +170,112 @@ def test_async_feature_cache_owns_cuda_transfer_until_atomic_publication(tmp_pat
     np.testing.assert_array_equal(
         cached_features(tmp_path, "bundle", "source"), expected.numpy()
     )
+
+
+@pytest.mark.parametrize("sizes", [[1], [1, 4, 1, 9, 2, 1]])
+def test_fused_block_norm_matches_reference_values_and_gradients(sizes):
+    from fairchem.core.frozen_hip.packed import block_rmse
+
+    data = metadata(sizes)
+    packed = [
+        pack_hessian(np.random.default_rng(n).normal(size=(3 * n, 3 * n)))
+        for n in sizes
+    ]
+    data.hip_pair_targets = torch.tensor(
+        np.concatenate([p[0] for p in packed]), device="cuda"
+    )
+    data.hip_diagonal_targets = torch.tensor(
+        np.concatenate([p[1] for p in packed]), device="cuda"
+    )
+    edge = torch.randn(
+        sum(n * (n - 1) for n in sizes), 3, 3, device="cuda", requires_grad=True
+    )
+    node = torch.randn(sum(sizes), 3, 3, device="cuda", requires_grad=True)
+    expected = block_rmse(edge, node, data)
+    expected_gradients = torch.autograd.grad(expected, (edge, node), allow_unused=True)
+    data.hip_fused_loss = True
+    actual = block_rmse(edge, node, data)
+    gradients = torch.autograd.grad(actual, (edge, node))
+    torch.testing.assert_close(actual, expected)
+    for got, wanted in zip(gradients, expected_gradients, strict=True):
+        if wanted is None:
+            assert got.numel() == 0
+        else:
+            torch.testing.assert_close(got, wanted)
+
+
+@pytest.mark.parametrize("value", [0.0, 1e-30, 1e-7, 1e20])
+def test_fused_block_norm_is_stable_at_zero_and_extreme_scales(value):
+    from fairchem.core.frozen_hip.packed import block_rmse
+
+    data = metadata([1])
+    data.hip_fused_loss = True
+    data.hip_pair_targets = torch.empty(0, device="cuda")
+    data.hip_diagonal_targets = torch.zeros(6, device="cuda")
+    edge = torch.empty(0, 3, 3, device="cuda", requires_grad=True)
+    node = torch.full((1, 3, 3), value, device="cuda", requires_grad=True)
+    loss = block_rmse(edge, node, data)
+    loss.backward()
+    torch.testing.assert_close(
+        loss, torch.tensor(2 * value, device="cuda"), rtol=2e-5, atol=0
+    )
+    torch.testing.assert_close(
+        node.grad, torch.full_like(node, 0 if value == 0 else 2 / 9)
+    )
+
+
+@pytest.mark.parametrize("pbc_device", ["cpu", "cuda"])
+@pytest.mark.parametrize("max_neighbors", [8, 300])
+def test_vectorized_backbone_graph_matches_grid_graph_for_nonperiodic_molecules(
+    max_neighbors,
+    pbc_device,
+):
+    from fairchem.core.graph.compute import generate_graph
+
+    torch.manual_seed(121)
+    data = metadata([2, 5, 27, 350])
+    data.batch = torch.arange(len(data.hip_sizes), device="cuda").repeat_interleave(
+        data.natoms
+    )
+    data.cell = torch.eye(3, device="cuda").mul(120).repeat(len(data.hip_sizes), 1, 1)
+    data.pbc = torch.zeros(len(data.hip_sizes), 3, device=pbc_device, dtype=torch.bool)
+    data.pos = data.pos * 2 + 120
+    reference = generate_graph(data, 6.0, max_neighbors, False, 2, data.pbc)
+    actual = generate_graph(data, 6.0, max_neighbors, False, 1, data.pbc)
+
+    def canonical(graph):
+        edges = graph["edge_index"]
+        order = (edges[1] * len(data.pos) + edges[0]).argsort()
+        return (
+            edges[:, order],
+            graph["edge_distance"][order],
+            graph["edge_distance_vec"][order],
+        )
+
+    for got, wanted in zip(canonical(actual), canonical(reference), strict=True):
+        torch.testing.assert_close(got, wanted)
+
+
+def test_custom_atomic_data_pins_targets_and_keeps_cpu_cache_metadata():
+    from fairchem.core.frozen_hip.data import make_batch
+
+    values = dict(
+        natoms=np.array([2]),
+        atom_ptr=np.array([0, 2]),
+        atomic_numbers=np.array([1, 1]),
+        coords=np.zeros((2, 3)),
+        charge=np.array([0]),
+        spin=np.array([1]),
+        omol_index=np.array([7]),
+        hessian_ptr=np.array([0, 36]),
+        hessian_flat=np.zeros(36, dtype=np.float32),
+    )
+    data = make_batch(values, np.array([0]))
+    marker = SimpleNamespace(rows=[0])
+    data.hip_cache_groups = [marker]
+    data.pin_memory()
+    assert data.pos.is_pinned()
+    assert data.hessian.is_pinned()
+    assert data.batch.is_pinned()
+    assert data.hip_cache_groups[0] is marker
+    assert marker.rows == [0]
