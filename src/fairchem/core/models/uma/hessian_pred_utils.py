@@ -39,9 +39,7 @@ def irreps_to_cartesian_matrix(
 ) -> torch.Tensor:
     """Convert l=0,1,2 irreps to Cartesian 3x3 matrices."""
     if basis is None:
-        basis = get_cartesian_wigner_3j_basis(
-            dtype=irreps.dtype, device=irreps.device
-        )
+        basis = get_cartesian_wigner_3j_basis(dtype=irreps.dtype, device=irreps.device)
     elif basis.dtype != irreps.dtype or basis.device != irreps.device:
         basis = basis.to(dtype=irreps.dtype, device=irreps.device)
     return torch.einsum("...k,ijk->...ij", irreps, basis)
@@ -60,19 +58,30 @@ def _reject_graph_parallel(data: AtomicData) -> None:
 
 def fully_connected_hessian_graph_batch(
     data: AtomicData,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Build all directed, non-self edges within each AtomicData sample."""
     _reject_graph_parallel(data)
     device = data.pos.device
     dtype = data.pos.dtype
-    num_nodes = data.pos.shape[0]
-    source = torch.arange(num_nodes, device=device, dtype=torch.long).repeat(num_nodes)
-    target = torch.arange(num_nodes, device=device, dtype=torch.long).repeat_interleave(
-        num_nodes
-    )
-    keep = (data.batch[source] == data.batch[target]) & (source != target)
-    source = source[keep]
-    target = target[keep]
+    # Construct only within-system edges. A batch-wide Cartesian product wastes
+    # a factor of batch_size memory before removing all cross-system pairs.
+    sizes = getattr(data, "hip_sizes", None)
+    if sizes is None:
+        sizes = data.natoms.tolist()
+    sources, targets = [], []
+    offset = 0
+    for size in sizes:
+        pair = torch.arange(size * (size - 1), device=device)
+        target_local = pair.div(max(1, size - 1), rounding_mode="floor")
+        source_local = pair.remainder(max(1, size - 1))
+        source_local = source_local + (source_local >= target_local)
+        sources.append(source_local + offset)
+        targets.append(target_local + offset)
+        offset += size
+    source = torch.cat(sources)
+    target = torch.cat(targets)
 
     edge_index = torch.stack((source, target), dim=0)
     edge_distance_vec = data.pos[source] - data.pos[target]
@@ -96,7 +105,9 @@ def radius_hessian_graph_batch(
     cutoff: float,
     use_pbc: bool = False,
     radius_pbc_version: int = 2,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Build an unpruned cutoff Hessian graph with FairChem graph generation."""
     _reject_graph_parallel(data)
     pbc = data.pbc if use_pbc else torch.zeros_like(data.pbc, dtype=torch.bool)
@@ -138,7 +149,9 @@ def _set_hessian_ptrs_and_offsets(
         hess_offsets[1:] = hess_cumsum[:-1]
 
     data.hessian_nentries = hessian_nentries
-    data.ptr_1d_hessian = torch.empty(natoms.numel() + 1, device=device, dtype=torch.long)
+    data.ptr_1d_hessian = torch.empty(
+        natoms.numel() + 1, device=device, dtype=torch.long
+    )
     data.ptr_1d_hessian[0] = 0
     data.ptr_1d_hessian[1:] = hess_cumsum
     return natoms, node_offsets, hess_offsets
