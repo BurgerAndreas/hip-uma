@@ -1,0 +1,256 @@
+"""
+Copyright (c) Meta Platforms, Inc. and affiliates.
+
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+
+Select and stream a fixed evaluation cohort independently of training settings.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import IterableDataset, get_worker_info
+
+from fairchem.core.frozen_hip.data import (
+    BalancedBatchSampler,
+    pack_window_batch,
+    validation_mask,
+)
+
+DATA_REVISION = "7ce83e7425649619c9f85dad485bb2cfd7ee12bd"
+SELECTION = "parent-holdout-splitmix64-v1"
+
+
+def evaluation_mask(indices):
+    """
+    Select a fixed tenth of the original one-percent parent-index holdout.
+
+    SplitMix64 avoids correlation with the original linear holdout hash.
+    The selection has no dependency on training seeds, ordering, or GPU counts.
+    """
+    x = np.asarray(indices, dtype=np.uint64)
+    with np.errstate(over="ignore"):
+        z = x + np.uint64(0x9E3779B97F4A7C15)
+        z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+        z ^= z >> np.uint64(31)
+    return validation_mask(x) & (z % np.uint64(10) == 0)
+
+
+def sample_fingerprint(indices):
+    """
+    Identify cohort membership independently of its partition and presentation.
+    """
+    values = np.sort(np.asarray(indices, dtype="<u8"))
+    return hashlib.sha256(values.tobytes()).hexdigest()
+
+
+def _read_manifest_marker(request):
+    root, marker = request
+    record = json.loads(marker.read_text())
+    entry, chosen = None, []
+    with h5py.File(root / record["path"], "r") as f:
+        indices = f["omol_index"][:]
+        rows = np.flatnonzero(evaluation_mask(indices))
+        if len(rows):
+            chosen = indices[rows].astype(np.int64).tolist()
+            entry = dict(
+                path=record["path"],
+                source_sha256=record["sha256"],
+                rows=rows.tolist(),
+                omol_indices=chosen,
+                natoms=f["natoms"][:][rows].astype(np.int64).tolist(),
+            )
+    return len(indices), entry, chosen
+
+
+def build_manifest(root, completion):
+    """
+    Scan only sample metadata from the complete, verified source snapshot.
+    """
+    root = Path(root)
+    markers = sorted(root.glob("shards/*/*.verified.json"))
+    if completion["revision"] != DATA_REVISION:
+        raise ValueError("Evaluation requires the pinned scientific snapshot")
+    if len(markers) != completion["shards"]:
+        raise ValueError("Complete all verified shards before fixing evaluation")
+    entries, ids = [], []
+    scanned = 0
+
+    with ProcessPoolExecutor(max_workers=8) as pool:
+        for index, (count, entry, chosen) in enumerate(
+            pool.map(
+                _read_manifest_marker,
+                ((root, marker) for marker in markers),
+                chunksize=16,
+            )
+        ):
+            scanned += count
+            if entry:
+                entries.append(entry)
+                ids.extend(chosen)
+            if (index + 1) % 1000 == 0:
+                print(f"Scanned {index + 1}/{len(markers)} shards", flush=True)
+    if scanned != completion["samples"]:
+        raise ValueError("Source sample count differs from the completed snapshot")
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("Evaluation IDs must be nonempty and unique")
+    return dict(
+        version=1,
+        selection=SELECTION,
+        dataset_revision=DATA_REVISION,
+        samples=len(ids),
+        sample_ids_sha256=sample_fingerprint(ids),
+        entries=entries,
+    )
+
+
+def write_manifest(path, manifest):
+    """
+    Atomically publish portable sample identities and relative source locations.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def load_manifest(path):
+    """
+    Reject changed membership, duplicate samples, or a different source snapshot.
+    """
+    manifest = json.loads(Path(path).read_text())
+    if (
+        manifest["selection"] != SELECTION
+        or manifest["dataset_revision"] != DATA_REVISION
+    ):
+        raise ValueError("Unexpected evaluation cohort version or dataset revision")
+    ids = [i for entry in manifest["entries"] for i in entry["omol_indices"]]
+    if len(ids) != manifest["samples"] or len(set(ids)) != len(ids) or not ids:
+        raise ValueError("Evaluation cohort count or uniqueness differs")
+    if not evaluation_mask(ids).all():
+        raise ValueError("Evaluation contains samples outside the fixed holdout")
+    if sample_fingerprint(ids) != manifest["sample_ids_sha256"]:
+        raise ValueError("Evaluation cohort fingerprint differs")
+    return manifest
+
+
+def read_selected(root, entry):
+    """
+    Read selected atom and Hessian spans, without decompressing whole shards.
+    """
+    relative = Path(entry["path"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("Evaluation source paths must be relative")
+    path = Path(root) / relative
+    marker = json.loads(path.with_suffix(".verified.json").read_text())
+    if marker["sha256"] != entry["source_sha256"]:
+        raise ValueError("Evaluation source checksum marker differs")
+    rows = entry["rows"]
+    with h5py.File(path, "r") as f:
+        if not f.attrs.get("complete") or f.attrs.get("model") != "uma-s-1p2":
+            raise ValueError("Require complete UMA-s-1.2 evaluation shards")
+        if f.attrs.get("hessian_unit") != "eV/Angstrom^2":
+            raise ValueError("Unexpected evaluation Hessian units")
+        indices = f["omol_index"][:][rows]
+        sizes = f["natoms"][:][rows].astype(np.int64)
+        if (
+            indices.tolist() != entry["omol_indices"]
+            or sizes.tolist() != entry["natoms"]
+        ):
+            raise ValueError("Evaluation row identities or atom counts differ")
+        ap, hp = f["atom_ptr"][:], f["hessian_ptr"][:]
+        values = {
+            key: np.concatenate([f[key][ap[r] : ap[r + 1]] for r in rows])
+            for key in ("atomic_numbers", "coords")
+        }
+        values.update(
+            natoms=sizes,
+            omol_index=indices,
+            atom_ptr=np.r_[0, np.cumsum(sizes)],
+            hessian_ptr=np.r_[0, np.cumsum(9 * sizes**2)],
+            hessian_flat=np.concatenate(
+                [f["hessian_flat"][hp[r] : hp[r + 1]] for r in rows]
+            ),
+            charge=f["charge"][:][rows],
+            spin=f["spin"][:][rows],
+        )
+    if len(values["atomic_numbers"]) != values["atom_ptr"][-1]:
+        raise ValueError("Evaluation atom spans differ from molecule sizes")
+    if len(values["hessian_flat"]) != values["hessian_ptr"][-1]:
+        raise ValueError("Evaluation Hessian spans differ from molecule sizes")
+    return values, {"path": entry["path"], "sha256": entry["source_sha256"]}, None
+
+
+class EvaluationStream(IterableDataset):
+    """
+    Evaluate every fixed cohort member exactly once across any GPU count.
+    """
+
+    def __init__(
+        self,
+        root,
+        manifest,
+        *,
+        rank=0,
+        world=1,
+        max_batch=32,
+        max_atoms=1280,
+        pair_budget=196608,
+        window_files=64,
+    ):
+        super().__init__()
+        self.root, self.manifest = root, manifest
+        self.rank, self.world = rank, world
+        self.max_batch, self.max_atoms = max_batch, max_atoms
+        self.pair_budget, self.window_files = pair_budget, window_files
+
+    def __iter__(self):
+        entries = self.manifest["entries"][self.rank :: self.world]
+        worker = get_worker_info()
+        if worker is not None:
+            entries = entries[worker.id :: worker.num_workers]
+        for start in range(0, len(entries), self.window_files):
+            window = [
+                read_selected(self.root, row)
+                for row in entries[start : start + self.window_files]
+            ]
+            refs = [
+                (source, row)
+                for source, (values, _, _) in enumerate(window)
+                for row in range(len(values["natoms"]))
+            ]
+            sizes = [int(window[source][0]["natoms"][row]) for source, row in refs]
+            batches = BalancedBatchSampler(
+                sizes,
+                max_atoms=self.max_atoms,
+                batch_size=self.max_batch,
+                pair_budget=self.pair_budget,
+            )
+            for batch in batches:
+                groups = {}
+                for index in batch:
+                    source, row = refs[index]
+                    groups.setdefault(source, []).append(row)
+                yield pack_window_batch(window, list(groups.items()))
+
+
+def load_last_head(head, checkpoint_path, backbone_sha256, device):
+    """
+    Reload the named last checkpoint rather than selecting weights by metrics.
+    """
+    state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if state["backbone_sha256"] != backbone_sha256:
+        raise ValueError("Last evaluation checkpoint has a different backbone")
+    head.load_state_dict(state["head"])
+    return state

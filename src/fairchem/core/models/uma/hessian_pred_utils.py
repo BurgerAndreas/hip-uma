@@ -63,6 +63,14 @@ def fully_connected_hessian_graph_batch(
 ]:
     """Build all directed, non-self edges within each AtomicData sample."""
     _reject_graph_parallel(data)
+    if (
+        getattr(data, "hip_fused_graph", False)
+        and data.pos.is_cuda
+        and not data.pos.requires_grad
+    ):
+        from fairchem.core.frozen_hip.kernels import graph
+
+        return graph(data)
     device = data.pos.device
     dtype = data.pos.dtype
     # Construct only within-system edges. A batch-wide Cartesian product wastes
@@ -239,6 +247,7 @@ def add_hessian_graph_batch(
     use_pbc: bool = False,
     fully_connected: bool = True,
     radius_pbc_version: int = 2,
+    assembly_indices: bool = True,
 ) -> AtomicData:
     """Attach a Hessian graph and flattened scatter indices to AtomicData."""
     if fully_connected:
@@ -266,9 +275,10 @@ def add_hessian_graph_batch(
     data.cell_offset_distances_hessian = offset_distances
     data.neighbors_hessian = neighbors
 
-    natoms, node_offsets, hess_offsets = _set_hessian_ptrs_and_offsets(data)
-    _add_offdiagonal_indices(data, edge_index, natoms, node_offsets, hess_offsets)
-    _add_diagonal_indices(data, natoms, node_offsets, hess_offsets)
+    if assembly_indices:
+        natoms, node_offsets, hess_offsets = _set_hessian_ptrs_and_offsets(data)
+        _add_offdiagonal_indices(data, edge_index, natoms, node_offsets, hess_offsets)
+        _add_diagonal_indices(data, natoms, node_offsets, hess_offsets)
     return data
 
 

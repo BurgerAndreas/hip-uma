@@ -46,7 +46,11 @@ class PermuteWignerInvEdgeToNodeFunction(torch.autograd.Function):
 
         # Allocation VISIBLE to torch.compile (can be optimized)
         out = torch.empty_like(x)
-        x_l = torch.empty_like(x)
+        x_l = (
+            torch.empty_like(x)
+            if ctx.needs_input_grad[1]
+            else x.new_empty((0, 9, x.shape[2]))
+        )
 
         # Ensure inputs are contiguous for Triton
         x = x.contiguous()
@@ -83,18 +87,20 @@ class PermuteWignerInvEdgeToNodeFunction(torch.autograd.Function):
             grad_out, wigner, grad_x
         )
 
-        # Allocation VISIBLE to torch.compile (zeros for off-diagonal blocks)
-        grad_wigner_flat = torch.zeros(
-            (num_edges, 81),
-            dtype=grad_out.dtype,
-            device=grad_out.device,
-        )
+        grad_wigner = None
+        if ctx.needs_input_grad[1]:
+            # Allocation VISIBLE to torch.compile (zeros for off-diagonal blocks)
+            grad_wigner_flat = torch.zeros(
+                (num_edges, 81),
+                dtype=grad_out.dtype,
+                device=grad_out.device,
+            )
 
-        # ONLY kernel launch is opaque
-        torch.ops.fairchem._kernel_permute_wigner_inv_edge_to_node_bwd_dw(
-            grad_out, x_l, grad_wigner_flat
-        )
+            # ONLY kernel launch is opaque
+            torch.ops.fairchem._kernel_permute_wigner_inv_edge_to_node_bwd_dw(
+                grad_out, x_l, grad_wigner_flat
+            )
 
-        grad_wigner = grad_wigner_flat.reshape(num_edges, 9, 9)
+            grad_wigner = grad_wigner_flat.reshape(num_edges, 9, 9)
 
         return grad_x, grad_wigner

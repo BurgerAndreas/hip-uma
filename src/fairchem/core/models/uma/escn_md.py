@@ -1218,6 +1218,7 @@ class Hessian_Head(nn.Module, HeadInterface):
             raise ValueError("num_layers_hessian must be non-negative")
 
         object.__setattr__(self, "_backbone_ref", weakref.ref(backbone))
+        self.backend = backbone.backend
         self.num_layers_hessian = num_layers_hessian
         self.cutoff_hessian = cutoff_hessian
         self.fully_connected_hessian = fully_connected_hessian
@@ -1295,15 +1296,18 @@ class Hessian_Head(nn.Module, HeadInterface):
             use_pbc=self.use_pbc_hessian,
             fully_connected=self.fully_connected_hessian,
             radius_pbc_version=self.radius_pbc_version_hessian,
+            assembly_indices=not hasattr(data, "hip_pair_targets"),
         )
 
         wigner, wigner_inv = self.backbone._get_rotmat_and_wigner(
             data.edge_distance_vec_hessian
         )
         coefficient_index = (
-            self.backbone.coefficient_index if self.backbone.mmax != self.backbone.lmax else None
+            self.backbone.coefficient_index
+            if self.backbone.mmax != self.backbone.lmax
+            else None
         )
-        wigner, wigner_inv = self.backbone.backend.prepare_wigner(
+        wigner, wigner_inv = self.backend.prepare_wigner(
             wigner,
             wigner_inv,
             self.backbone.mappingReduced,
@@ -1328,6 +1332,13 @@ class Hessian_Head(nn.Module, HeadInterface):
         )
         wigner_inv_envelope = wigner_inv * edge_envelope
         return x_edge, wigner, wigner_inv_envelope
+
+    def projected_edge_irreps(
+        self, node_embedding, x_edge, edge_index, wigner, wigner_inv
+    ):
+        from fairchem.core.frozen_hip.readout import edge_irreps
+
+        return edge_irreps(self, node_embedding, x_edge, edge_index, wigner, wigner_inv)
 
     def forward(
         self, data: AtomicData, emb: dict[str, torch.Tensor]
@@ -1354,26 +1365,34 @@ class Hessian_Head(nn.Module, HeadInterface):
                 )
 
         node_embedding = self.norm(node_embedding)
-        edge_features = self.edge_readout.forward_messages(
-            node_embedding,
-            x_edge,
-            data.edge_index_hessian,
-            wigner,
-            wigner_inv_envelope,
-            total_atoms_across_gp_ranks=data.pos.shape[0],
-        )
-
-        node_l012 = get_l_component_range(
-            node_embedding, l_min=0, l_max=2
-        )
-        edge_l012 = get_l_component_range(edge_features, l_min=0, l_max=2)
+        node_l012 = get_l_component_range(node_embedding, l_min=0, l_max=2)
         node_irreps = self.node_projection(node_l012).squeeze(-1)
-        edge_irreps = self.edge_projection(edge_l012).squeeze(-1)
+        if getattr(self, "projected_readout", False):
+            edge_irreps = self.projected_edge_irreps(
+                node_embedding,
+                x_edge,
+                data.edge_index_hessian,
+                wigner,
+                wigner_inv_envelope,
+            )
+        else:
+            edge_features = self.edge_readout.forward_messages(
+                node_embedding,
+                x_edge,
+                data.edge_index_hessian,
+                wigner,
+                wigner_inv_envelope,
+                total_atoms_across_gp_ranks=data.pos.shape[0],
+            )
+            edge_l012 = get_l_component_range(edge_features, l_min=0, l_max=2)
+            edge_irreps = self.edge_projection(edge_l012).squeeze(-1)
         basis = self.cartesian_wigner_3j_basis.to(
             device=node_irreps.device, dtype=node_irreps.dtype
         )
         node_blocks = irreps_to_cartesian_matrix(node_irreps, basis)
         edge_blocks = irreps_to_cartesian_matrix(edge_irreps, basis)
+        if hasattr(data, "hip_pair_targets"):
+            return {"edge_blocks": edge_blocks, "node_blocks": node_blocks}
         hessian = blocks3x3_to_hessian(
             data.edge_index_hessian,
             data,

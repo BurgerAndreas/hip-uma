@@ -73,7 +73,7 @@ class NodeToEdgeWignerPermuteFunction(torch.autograd.Function):
             device=x.device,
         )
         x_edge = torch.empty(
-            (num_edges, 9, sphere_channels * 2),
+            (num_edges if ctx.needs_input_grad[2] else 0, 9, sphere_channels * 2),
             dtype=x.dtype,
             device=x.device,
         )
@@ -112,58 +112,76 @@ class NodeToEdgeWignerPermuteFunction(torch.autograd.Function):
         # Ensure grad_out is contiguous
         grad_out = grad_out.contiguous()
 
-        # Allocation VISIBLE to torch.compile
-        grad_edge = torch.empty(
-            (num_edges, 9, sphere_channels * 2),
-            dtype=grad_out.dtype,
-            device=grad_out.device,
-        )
+        if (
+            grad_out.dtype == torch.float32
+            and not torch.are_deterministic_algorithms_enabled()
+        ):
+            grad_x = torch.zeros(
+                (ctx.num_nodes, 9, sphere_channels),
+                dtype=grad_out.dtype,
+                device=grad_out.device,
+            )
+            torch.ops.fairchem._kernel_node_to_edge_wigner_permute_bwd_scatter(
+                grad_out,
+                wigner,
+                edge_index,
+                grad_x,
+            )
+        else:
+            # Allocation VISIBLE to torch.compile
+            grad_edge = torch.empty(
+                (num_edges, 9, sphere_channels * 2),
+                dtype=grad_out.dtype,
+                device=grad_out.device,
+            )
 
-        # ONLY kernel launch is opaque
-        torch.ops.fairchem._kernel_node_to_edge_wigner_permute_bwd_dx(
-            grad_out, wigner, grad_edge
-        )
+            # ONLY kernel launch is opaque
+            torch.ops.fairchem._kernel_node_to_edge_wigner_permute_bwd_dx(
+                grad_out, wigner, grad_edge
+            )
 
-        # Scatter (VISIBLE to torch.compile)
-        grad_x = torch.zeros(
-            (ctx.num_nodes, 9, sphere_channels),
-            dtype=grad_out.dtype,
-            device=grad_out.device,
-        )
+            # Scatter (VISIBLE to torch.compile)
+            grad_x = torch.zeros(
+                (ctx.num_nodes, 9, sphere_channels),
+                dtype=grad_out.dtype,
+                device=grad_out.device,
+            )
 
-        # Slice: grad_edge [E, 9, 2C] -> src at [:C], tgt at [C:]
-        grad_src = grad_edge[:, :, :sphere_channels].reshape(
-            num_edges, 9 * sphere_channels
-        )
-        grad_tgt = grad_edge[:, :, sphere_channels:].reshape(
-            num_edges, 9 * sphere_channels
-        )
+            # Slice: grad_edge [E, 9, 2C] -> src at [:C], tgt at [C:]
+            grad_src = grad_edge[:, :, :sphere_channels].reshape(
+                num_edges, 9 * sphere_channels
+            )
+            grad_tgt = grad_edge[:, :, sphere_channels:].reshape(
+                num_edges, 9 * sphere_channels
+            )
 
-        src_idx = edge_index[0]
-        tgt_idx = edge_index[1]
+            src_idx = edge_index[0]
+            tgt_idx = edge_index[1]
 
-        grad_x_flat = grad_x.view(ctx.num_nodes, 9 * sphere_channels)
-        grad_x_flat.index_add_(0, src_idx, grad_src)
-        grad_x_flat.index_add_(0, tgt_idx, grad_tgt)
+            grad_x_flat = grad_x.view(ctx.num_nodes, 9 * sphere_channels)
+            grad_x_flat.index_add_(0, src_idx, grad_src)
+            grad_x_flat.index_add_(0, tgt_idx, grad_tgt)
 
-        # grad_wigner = dy @ x^T using block-sparse structure
-        # Convert grad to L-major for outer product
-        grad_l = _permute_m_to_l(grad_out)  # [E, 9, 2C]
+        grad_wigner = None
+        if ctx.needs_input_grad[2]:
+            # grad_wigner = dy @ x^T using block-sparse structure
+            # Convert grad to L-major for outer product
+            grad_l = _permute_m_to_l(grad_out)  # [E, 9, 2C]
 
-        E = x_edge.shape[0]
-        grad_wigner = torch.zeros(E, 9, 9, device=wigner.device, dtype=wigner.dtype)
+            E = x_edge.shape[0]
+            grad_wigner = torch.zeros(E, 9, 9, device=wigner.device, dtype=wigner.dtype)
 
-        # L=0 block (1x1)
-        grad_wigner[:, 0, 0] = (grad_l[:, 0, :] * x_edge[:, 0, :]).sum(dim=-1)
+            # L=0 block (1x1)
+            grad_wigner[:, 0, 0] = (grad_l[:, 0, :] * x_edge[:, 0, :]).sum(dim=-1)
 
-        # L=1 block (3x3)
-        grad_wigner[:, 1:4, 1:4] = torch.bmm(
-            grad_l[:, 1:4, :], x_edge[:, 1:4, :].transpose(1, 2)
-        )
+            # L=1 block (3x3)
+            grad_wigner[:, 1:4, 1:4] = torch.bmm(
+                grad_l[:, 1:4, :], x_edge[:, 1:4, :].transpose(1, 2)
+            )
 
-        # L=2 block (5x5)
-        grad_wigner[:, 4:9, 4:9] = torch.bmm(
-            grad_l[:, 4:9, :], x_edge[:, 4:9, :].transpose(1, 2)
-        )
+            # L=2 block (5x5)
+            grad_wigner[:, 4:9, 4:9] = torch.bmm(
+                grad_l[:, 4:9, :], x_edge[:, 4:9, :].transpose(1, 2)
+            )
 
         return grad_x, None, grad_wigner

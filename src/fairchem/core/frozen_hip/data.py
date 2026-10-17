@@ -29,7 +29,7 @@ def validation_mask(indices):
     return ((values * np.uint64(6364136223846793005)) % np.uint64(1000)) < 10
 
 
-def make_batch(values, rows):
+def make_batch(values, rows, *, include_hessian=True):
     """Pack ragged molecules directly, without per-molecule ASE objects."""
     sizes = values["natoms"][rows].astype(np.int64)
     b = len(rows)
@@ -47,7 +47,15 @@ def make_batch(values, rows):
         low = xyz.min(axis=0)
         cells[i, np.arange(3), np.arange(3)] = xyz.max(axis=0) - low + 240.0
         positions.append((xyz - low + 120.0).astype(np.float32))
-    labels = np.concatenate([values["hessian_flat"][hp[r] : hp[r + 1]] for r in rows])
+    labels = (
+        torch.from_numpy(
+            np.concatenate(
+                [values["hessian_flat"][hp[r] : hp[r + 1]] for r in rows]
+            ).copy()
+        )
+        if include_hessian
+        else None
+    )
     return AtomicData(
         pos=torch.from_numpy(np.concatenate(positions)),
         atomic_numbers=torch.from_numpy(numbers.astype(np.int64)),
@@ -61,7 +69,7 @@ def make_batch(values, rows):
         spin=torch.from_numpy(values["spin"][rows].astype(np.int64)),
         fixed=torch.zeros(int(sizes.sum()), dtype=torch.long),
         tags=torch.ones(int(sizes.sum()), dtype=torch.long),
-        hessian=torch.from_numpy(labels.copy()),
+        hessian=labels,
         batch=torch.arange(b).repeat_interleave(torch.from_numpy(sizes)),
         dataset=["omol"] * b,
         sid=[str(x) for x in values["omol_index"][rows]],
@@ -106,6 +114,23 @@ class BalancedBatchSampler:
                 atoms.append(n)
                 pairs.append(n * n)
         yield from batches
+
+
+def cache_balanced_batches(sizes, cached, *, max_atoms, batch_size, pair_budget):
+    """
+    Keep cache hits usable when a shard window also contains cache misses.
+    """
+    sizes = np.asarray(sizes)
+    cached = np.asarray(cached, dtype=bool)
+    for ready in (False, True):
+        rows = np.flatnonzero(cached == ready)
+        for batch in BalancedBatchSampler(
+            sizes[rows],
+            max_atoms=max_atoms,
+            batch_size=batch_size,
+            pair_budget=pair_budget,
+        ):
+            yield rows[batch].tolist()
 
 
 def microbatch_indices(batch, sizes, pair_budget):
@@ -283,8 +308,9 @@ class HessianStream(IterableDataset):
                     references.extend((source, r) for r in eligible)
                     sizes_window.extend(int(v["natoms"][r]) for r in eligible)
                 batches = list(
-                    BalancedBatchSampler(
+                    cache_balanced_batches(
                         sizes_window,
+                        [window[source][2] is not None for source, _ in references],
                         max_atoms=self.max_atoms,
                         batch_size=self.max_batch,
                         pair_budget=self.pair_budget,

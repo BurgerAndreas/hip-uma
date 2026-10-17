@@ -318,3 +318,107 @@ def test_microbatch_accumulation_matches_full_ragged_molecular_gradient():
         )
         (loss * len(batch) / len(sizes)).backward()
     torch.testing.assert_close(weights.grad, reference_grad)
+
+
+def test_partially_cached_windows_preserve_cache_hits_and_batch_limits():
+    from fairchem.core.frozen_hip.data import cache_balanced_batches
+
+    sizes = np.array([12, 30, 8, 17, 25, 4, 19, 9] * 20)
+    cached = np.arange(len(sizes)) % 3 == 0
+    batches = list(
+        cache_balanced_batches(
+            sizes, cached, max_atoms=128, batch_size=8, pair_budget=4096
+        )
+    )
+    assert sorted(i for batch in batches for i in batch) == list(range(len(sizes)))
+    for batch in batches:
+        assert np.all(cached[batch] == cached[batch[0]])
+        assert sizes[batch].sum() <= 128
+        assert len(batch) <= 8
+
+
+def test_trainable_complex_block_linear_preserves_outputs_gradients_and_updates():
+    from fairchem.core.frozen_hip.so2 import enable_block_so2
+    from fairchem.core.models.uma.nn.so2_layers import SO2_m_Conv
+
+    torch.manual_seed(16)
+    module = SO2_m_Conv(1, 8, 8, 2, 2)
+    x = torch.randn(13, 2, 16, requires_grad=True)
+    reference = torch.cat(module(x), dim=1)
+    probe = torch.randn_like(reference)
+    inputs = (x, module.fc.weight)
+    expected = torch.autograd.grad((reference * probe).sum(), inputs)
+    parameter = module.fc.weight
+    enable_block_so2(module)
+    assert module.fc.weight is parameter
+    actual = torch.cat(module(x), dim=1)
+    gradients = torch.autograd.grad((actual * probe).sum(), inputs)
+    torch.testing.assert_close(actual, reference)
+    for a, b in zip(gradients, expected, strict=True):
+        torch.testing.assert_close(a, b)
+    with torch.no_grad():
+        module.fc.weight.add_(0.1)
+    assert not torch.allclose(torch.cat(module(x), dim=1), actual)
+
+
+def test_projected_readout_preserves_rotation_bias_outputs_and_all_parameter_gradients():
+    from fairchem.core.frozen_hip.readout import project_convolution
+    from fairchem.core.models.uma.common.so3 import CoefficientMapping
+    from fairchem.core.models.uma.nn.so2_layers import SO2_Convolution
+    from fairchem.core.models.uma.nn.so3_layers import SO3_Linear
+
+    torch.manual_seed(38)
+    mapping = CoefficientMapping(2, 2)
+    conv = SO2_Convolution(8, 8, 2, 2, mapping, internal_weights=True)
+    projection = SO3_Linear(8, 1, 2)
+    with torch.no_grad():
+        conv.fc_m0.bias.normal_()
+        projection.bias.fill_(0.7)
+    messages = torch.randn(19, 9, 8, requires_grad=True)
+    wigner = torch.zeros(19, 9, 9)
+    for a, b in [(0, 1), (1, 4), (4, 9)]:
+        wigner[:, a:b, a:b] = torch.randn(19, b - a, b - a)
+    inverse = torch.einsum("eij,mj->eim", wigner, mapping.to_m)
+    inverse *= torch.rand(19, 1, 1)
+    reference = projection(torch.bmm(inverse, conv(messages)))
+    compact = torch.bmm(inverse, project_convolution(conv, projection, messages))
+    actual = torch.cat((compact[:, :1] + projection.bias, compact[:, 1:]), dim=1)
+    torch.testing.assert_close(actual, reference)
+    probe = torch.randn_like(reference)
+    inputs = (messages, *conv.parameters(), *projection.parameters())
+    expected = torch.autograd.grad((reference * probe).sum(), inputs)
+    gradients = torch.autograd.grad((actual * probe).sum(), inputs)
+    for a, b in zip(gradients, expected, strict=True):
+        torch.testing.assert_close(a, b, rtol=2e-5, atol=2e-5)
+    with torch.no_grad():
+        projection.weight.add_(0.05)
+    updated = torch.bmm(inverse, project_convolution(conv, projection, messages))
+    updated = torch.cat((updated[:, :1] + projection.bias, updated[:, 1:]), dim=1)
+    torch.testing.assert_close(updated, projection(torch.bmm(inverse, conv(messages))))
+    assert not torch.allclose(updated, actual)
+
+
+def test_async_feature_cache_drains_owned_host_copies_before_exit(tmp_path):
+    from types import SimpleNamespace
+
+    from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter, cached_features
+
+    writer = AsyncFeatureCacheWriter(tmp_path, max_pending=2)
+    expected = torch.arange(36, dtype=torch.float32).reshape(4, 9)
+    for row in range(2):
+        data = SimpleNamespace(
+            hip_cache_key="bundle",
+            hip_total_atoms=4,
+            hip_row_count=2,
+            hip_rows=[row],
+            hip_atom_spans=[(row * 2, row * 2 + 2)],
+            hip_training_rows=[0, 1],
+            hip_data_sha256="source",
+        )
+        values = expected[row * 2 : row * 2 + 2].clone()
+        writer.store(data, values)
+        values.zero_()
+    writer.close()
+    np.testing.assert_array_equal(
+        cached_features(tmp_path, "bundle", "source"), expected.numpy()
+    )

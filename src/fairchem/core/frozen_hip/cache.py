@@ -96,3 +96,101 @@ class FeatureCacheWriter:
             del self.active[key]
         while sum(a.nbytes for a, _ in self.active.values()) > self.max_bytes:
             self.active.popitem(last=False)
+
+
+class AsyncFeatureCacheWriter:
+    """
+    Copy frozen features asynchronously and publish files outside GPU dispatch.
+
+    A bounded queue owns pinned host tensors and CPU-only scatter metadata.
+    CUDA events protect reads; stream recording protects GPU storage lifetimes.
+    """
+
+    def __init__(self, root, max_bytes=16 << 30, max_pending=32):
+        import queue
+        import threading
+
+        if max_bytes < 1 or max_pending < 1:
+            raise ValueError("Feature cache memory and queue limits must be positive")
+        self.writer = FeatureCacheWriter(root, max_bytes=max_bytes)
+        self.pending = queue.Queue(maxsize=max_pending)
+        self.streams = {}
+        self.error = None
+        self.closed = False
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while True:
+            item = self.pending.get()
+            try:
+                if item is None:
+                    return
+                metadata, host, event = item
+                if event is not None:
+                    event.synchronize()
+                if self.error is None:
+                    self.writer.store(metadata, host)
+            except BaseException as error:
+                self.error = error
+            finally:
+                self.pending.task_done()
+
+    def _check_error(self):
+        if self.error is not None:
+            raise RuntimeError("Frozen feature cache writer failed") from self.error
+
+    def store(self, data, features):
+        import copy
+        from types import SimpleNamespace
+
+        import torch
+
+        if self.closed:
+            raise RuntimeError("Frozen feature cache writer is closed")
+        self._check_error()
+        if hasattr(data, "hip_cache_groups"):
+            metadata = SimpleNamespace(
+                hip_cache_groups=copy.deepcopy(data.hip_cache_groups)
+            )
+        else:
+            keys = (
+                "hip_cache_key",
+                "hip_total_atoms",
+                "hip_row_count",
+                "hip_rows",
+                "hip_atom_spans",
+                "hip_training_rows",
+                "hip_data_sha256",
+            )
+            metadata = SimpleNamespace(
+                **{key: copy.deepcopy(getattr(data, key)) for key in keys}
+            )
+        values = features.detach().float()
+        event = None
+        if values.is_cuda:
+            device = values.device
+            if device not in self.streams:
+                self.streams[device] = torch.cuda.Stream(device=device)
+            stream = self.streams[device]
+            host = torch.empty(values.shape, dtype=torch.float32, pin_memory=True)
+            stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(stream):
+                host.copy_(values, non_blocking=True)
+                values.record_stream(stream)
+                event = torch.cuda.Event()
+                event.record(stream)
+        else:
+            host = values.clone()
+        self.pending.put((metadata, host, event))
+        self._check_error()
+
+    def close(self):
+        """
+        Drain writes before successful exit and propagate background failures.
+        """
+        if not self.closed:
+            self.closed = True
+            self.pending.put(None)
+            self.thread.join()
+        self._check_error()

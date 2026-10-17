@@ -51,6 +51,7 @@ def node_to_edge_wigner_permute_kernel(
     x_edge_stride_c,
     BLOCK_C: tl.constexpr,
     GRID_E_STRIDE: tl.constexpr,
+    SAVE_INPUT: tl.constexpr = True,
 ):
     """
     Forward: Node-to-edge gather + block-diagonal Wigner rotation + L→M permutation.
@@ -188,135 +189,163 @@ def node_to_edge_wigner_permute_kernel(
         # =========================================================================
         # Store x_edge side outputs (for backward dW computation)
         # =========================================================================
-        x_edge_base = edge_id * x_edge_stride_e
-        # Source at [:C]
-        tl.store(
-            x_edge_ptr + x_edge_base + 0 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x0_src,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr + x_edge_base + 1 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x1_src,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr + x_edge_base + 2 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x2_src,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr + x_edge_base + 3 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x3_src,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr + x_edge_base + 4 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x4_src,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr + x_edge_base + 5 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x5_src,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr + x_edge_base + 6 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x6_src,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr + x_edge_base + 7 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x7_src,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr + x_edge_base + 8 * x_edge_stride_l + c_range * x_edge_stride_c,
-            x8_src,
-            mask=c_mask,
-        )
-        # Target at [C:2C]
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 0 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x0_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 1 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x1_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 2 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x2_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 3 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x3_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 4 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x4_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 5 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x5_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 6 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x6_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 7 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x7_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            x_edge_ptr
-            + x_edge_base
-            + 8 * x_edge_stride_l
-            + sphere_channels * x_edge_stride_c
-            + c_range * x_edge_stride_c,
-            x8_tgt,
-            mask=c_mask,
-        )
+        if SAVE_INPUT:
+            x_edge_base = edge_id * x_edge_stride_e
+            # Source at [:C]
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 0 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x0_src,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 1 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x1_src,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 2 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x2_src,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 3 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x3_src,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 4 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x4_src,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 5 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x5_src,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 6 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x6_src,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 7 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x7_src,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 8 * x_edge_stride_l
+                + c_range * x_edge_stride_c,
+                x8_src,
+                mask=c_mask,
+            )
+            # Target at [C:2C]
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 0 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x0_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 1 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x1_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 2 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x2_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 3 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x3_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 4 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x4_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 5 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x5_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 6 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x6_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 7 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x7_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                x_edge_ptr
+                + x_edge_base
+                + 8 * x_edge_stride_l
+                + sphere_channels * x_edge_stride_c
+                + c_range * x_edge_stride_c,
+                x8_tgt,
+                mask=c_mask,
+            )
 
         # =========================================================================
         # Block-diagonal Wigner rotation (exploits lmax=2 sparsity)
@@ -576,6 +605,9 @@ def node_to_edge_wigner_permute_bwd_dx_kernel(
     out_stride_c,
     BLOCK_C: tl.constexpr,
     GRID_E_STRIDE: tl.constexpr,
+    edge_index_ptr=None,
+    edge_stride=0,
+    SCATTER: tl.constexpr = False,
 ):
     """
     Backward w.r.t. input x: M→L permutation + W^T @ grad (NO scatter).
@@ -883,134 +915,300 @@ def node_to_edge_wigner_permute_bwd_dx_kernel(
         # =========================================================================
         # Store per-edge gradient (L-major order for subsequent scatter)
         # =========================================================================
-        tl.store(
-            grad_edge_ptr + out_base + 0 * out_stride_l + c_range * out_stride_c,
-            dx0_src,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr + out_base + 1 * out_stride_l + c_range * out_stride_c,
-            dx1_src,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr + out_base + 2 * out_stride_l + c_range * out_stride_c,
-            dx2_src,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr + out_base + 3 * out_stride_l + c_range * out_stride_c,
-            dx3_src,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr + out_base + 4 * out_stride_l + c_range * out_stride_c,
-            dx4_src,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr + out_base + 5 * out_stride_l + c_range * out_stride_c,
-            dx5_src,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr + out_base + 6 * out_stride_l + c_range * out_stride_c,
-            dx6_src,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr + out_base + 7 * out_stride_l + c_range * out_stride_c,
-            dx7_src,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr + out_base + 8 * out_stride_l + c_range * out_stride_c,
-            dx8_src,
-            mask=c_mask,
-        )
+        if SCATTER:
+            source = tl.load(edge_index_ptr + edge_id)
+            target = tl.load(edge_index_ptr + edge_stride + edge_id)
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 0 * out_stride_l
+                + c_range * out_stride_c,
+                dx0_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 1 * out_stride_l
+                + c_range * out_stride_c,
+                dx1_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 2 * out_stride_l
+                + c_range * out_stride_c,
+                dx2_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 3 * out_stride_l
+                + c_range * out_stride_c,
+                dx3_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 4 * out_stride_l
+                + c_range * out_stride_c,
+                dx4_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 5 * out_stride_l
+                + c_range * out_stride_c,
+                dx5_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 6 * out_stride_l
+                + c_range * out_stride_c,
+                dx6_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 7 * out_stride_l
+                + c_range * out_stride_c,
+                dx7_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + source * out_stride_e
+                + 8 * out_stride_l
+                + c_range * out_stride_c,
+                dx8_src,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 0 * out_stride_l
+                + c_range * out_stride_c,
+                dx0_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 1 * out_stride_l
+                + c_range * out_stride_c,
+                dx1_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 2 * out_stride_l
+                + c_range * out_stride_c,
+                dx2_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 3 * out_stride_l
+                + c_range * out_stride_c,
+                dx3_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 4 * out_stride_l
+                + c_range * out_stride_c,
+                dx4_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 5 * out_stride_l
+                + c_range * out_stride_c,
+                dx5_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 6 * out_stride_l
+                + c_range * out_stride_c,
+                dx6_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 7 * out_stride_l
+                + c_range * out_stride_c,
+                dx7_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+            tl.atomic_add(
+                grad_edge_ptr
+                + target * out_stride_e
+                + 8 * out_stride_l
+                + c_range * out_stride_c,
+                dx8_tgt,
+                mask=c_mask,
+                sem="relaxed",
+            )
+        else:
+            tl.store(
+                grad_edge_ptr + out_base + 0 * out_stride_l + c_range * out_stride_c,
+                dx0_src,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr + out_base + 1 * out_stride_l + c_range * out_stride_c,
+                dx1_src,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr + out_base + 2 * out_stride_l + c_range * out_stride_c,
+                dx2_src,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr + out_base + 3 * out_stride_l + c_range * out_stride_c,
+                dx3_src,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr + out_base + 4 * out_stride_l + c_range * out_stride_c,
+                dx4_src,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr + out_base + 5 * out_stride_l + c_range * out_stride_c,
+                dx5_src,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr + out_base + 6 * out_stride_l + c_range * out_stride_c,
+                dx6_src,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr + out_base + 7 * out_stride_l + c_range * out_stride_c,
+                dx7_src,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr + out_base + 8 * out_stride_l + c_range * out_stride_c,
+                dx8_src,
+                mask=c_mask,
+            )
 
-        # Target gradients at offset sphere_channels
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 0 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx0_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 1 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx1_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 2 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx2_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 3 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx3_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 4 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx4_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 5 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx5_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 6 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx6_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 7 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx7_tgt,
-            mask=c_mask,
-        )
-        tl.store(
-            grad_edge_ptr
-            + out_base
-            + 8 * out_stride_l
-            + sphere_channels
-            + c_range * out_stride_c,
-            dx8_tgt,
-            mask=c_mask,
-        )
+            # Target gradients at offset sphere_channels
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 0 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx0_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 1 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx1_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 2 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx2_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 3 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx3_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 4 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx4_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 5 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx5_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 6 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx6_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 7 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx7_tgt,
+                mask=c_mask,
+            )
+            tl.store(
+                grad_edge_ptr
+                + out_base
+                + 8 * out_stride_l
+                + sphere_channels
+                + c_range * out_stride_c,
+                dx8_tgt,
+                mask=c_mask,
+            )
         edge_id += GRID_E_STRIDE
 
 
@@ -1030,6 +1228,7 @@ def permute_wigner_inv_edge_to_node_kernel(
     sphere_channels,
     BLOCK_C: tl.constexpr,
     GRID_E_STRIDE: tl.constexpr,
+    SAVE_INPUT: tl.constexpr = True,
 ):
     """
     Forward: M→L permutation + block-diagonal Wigner^{-1} rotation.
@@ -1084,16 +1283,17 @@ def permute_wigner_inv_edge_to_node_kernel(
         )  # L=8 <- M=7
 
         # Save x_l for backward dW computation
-        xl_base = edge_id * 9 * sphere_channels
-        tl.store(XL_ptr + xl_base + 0 * sphere_channels + c_range, x0, mask=c_mask)
-        tl.store(XL_ptr + xl_base + 1 * sphere_channels + c_range, x1, mask=c_mask)
-        tl.store(XL_ptr + xl_base + 2 * sphere_channels + c_range, x2, mask=c_mask)
-        tl.store(XL_ptr + xl_base + 3 * sphere_channels + c_range, x3, mask=c_mask)
-        tl.store(XL_ptr + xl_base + 4 * sphere_channels + c_range, x4, mask=c_mask)
-        tl.store(XL_ptr + xl_base + 5 * sphere_channels + c_range, x5, mask=c_mask)
-        tl.store(XL_ptr + xl_base + 6 * sphere_channels + c_range, x6, mask=c_mask)
-        tl.store(XL_ptr + xl_base + 7 * sphere_channels + c_range, x7, mask=c_mask)
-        tl.store(XL_ptr + xl_base + 8 * sphere_channels + c_range, x8, mask=c_mask)
+        if SAVE_INPUT:
+            xl_base = edge_id * 9 * sphere_channels
+            tl.store(XL_ptr + xl_base + 0 * sphere_channels + c_range, x0, mask=c_mask)
+            tl.store(XL_ptr + xl_base + 1 * sphere_channels + c_range, x1, mask=c_mask)
+            tl.store(XL_ptr + xl_base + 2 * sphere_channels + c_range, x2, mask=c_mask)
+            tl.store(XL_ptr + xl_base + 3 * sphere_channels + c_range, x3, mask=c_mask)
+            tl.store(XL_ptr + xl_base + 4 * sphere_channels + c_range, x4, mask=c_mask)
+            tl.store(XL_ptr + xl_base + 5 * sphere_channels + c_range, x5, mask=c_mask)
+            tl.store(XL_ptr + xl_base + 6 * sphere_channels + c_range, x6, mask=c_mask)
+            tl.store(XL_ptr + xl_base + 7 * sphere_channels + c_range, x7, mask=c_mask)
+            tl.store(XL_ptr + xl_base + 8 * sphere_channels + c_range, x8, mask=c_mask)
 
         # L=0 block (1x1)
         w00 = tl.load(W_ptr + w_base + 0)

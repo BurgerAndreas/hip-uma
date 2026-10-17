@@ -91,6 +91,7 @@ def _kernel_node_to_edge_wigner_permute(
         x_edge.stride(2),
         BLOCK_C=BLOCK_C,
         GRID_E_STRIDE=GRID_E_STRIDE,
+        SAVE_INPUT=x_edge.numel() > 0,
         num_warps=1,
     )
 
@@ -127,6 +128,7 @@ def _kernel_permute_wigner_inv_edge_to_node(
         C,
         BLOCK_C=BLOCK_C,
         GRID_E_STRIDE=GRID_E_STRIDE,
+        SAVE_INPUT=x_l.numel() > 0,
         num_warps=1,
     )
 
@@ -245,4 +247,35 @@ def _kernel_permute_wigner_inv_edge_to_node_bwd_dw(
         sphere_channels,
         GRID_E_STRIDE=GRID_E_STRIDE,
         num_warps=1,
+    )
+
+
+@triton_op(
+    "fairchem::_kernel_node_to_edge_wigner_permute_bwd_scatter",
+    mutates_args=("grad_x",),
+)
+def _kernel_node_to_edge_wigner_permute_bwd_scatter(
+    grad_out: Tensor,
+    wigner: Tensor,
+    edge_index: Tensor,
+    grad_x: Tensor,
+) -> None:
+    """
+    Rotate and scatter gradients without per-edge output and slice copies.
+    """
+    channels = grad_x.shape[2]
+    wrap_triton(node_to_edge_wigner_permute_bwd_dx_kernel)[(GRID_E_STRIDE,)](
+        grad_out,
+        wigner.reshape(-1, 81),
+        grad_x,
+        grad_out.shape[0],
+        channels,
+        *grad_out.stride(),
+        *grad_x.stride(),
+        BLOCK_C=channels,
+        GRID_E_STRIDE=GRID_E_STRIDE,
+        edge_index_ptr=edge_index,
+        edge_stride=edge_index.stride(0),
+        SCATTER=True,
+        num_warps=4 if channels >= 128 else 1,
     )

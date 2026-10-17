@@ -57,6 +57,19 @@ class FrozenHIP(nn.Module):
         self.backbone.eval()
         return self
 
+    def features(self, data, precision="fp32"):
+        """
+        Keep weights frozen while optionally accelerating dense inference math.
+        """
+        if precision not in ("fp32", "fp16"):
+            raise ValueError("Frozen backbone precision must be fp32 or fp16")
+        with torch.no_grad(), torch.autocast(
+            "cuda", dtype=torch.float16, enabled=precision == "fp16"
+        ):
+            emb = self.backbone(data)
+        emb["node_embedding"] = emb["node_embedding"].float()
+        return emb
+
     def forward(self, data):
         # Energy and force heads are deliberately absent. No backbone activations
         # are saved for backward, and only HIP parameters enter the optimizer.
