@@ -264,3 +264,5 @@ This includes:
   Do not select the best checkpoint or use batch-limited evaluation.
 - Avoid DDP compiler graph splitting for the dynamic HIP head. Its symbolic
   graph reshapes need the normal compiler path.
+- Validation MAE needs the original asymmetric labels. Keep dense labels in
+  the fixed-cohort cache; triangular labels plus a constant preserve MSE only.

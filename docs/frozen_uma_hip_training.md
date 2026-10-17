@@ -123,6 +123,23 @@ The ten-million-sample dataset therefore supplies approximately 10,000 molecules
 The rule does not use the training seed, GPU count, or batch settings.
 Training continues to exclude the complete original one-percent holdout.
 
+Cache the fixed cohort once to avoid thousands of small source-file reads:
+
+```bash
+python tools/cache_hip_validation.py --data "$DATA_DIR" --workers 8
+```
+
+The loader automatically reads `validation_10000.hip` when this file exists.
+The cache keeps original dense labels and coordinates. It does not symmetrize
+validation targets, so MAE and MSE retain their original definitions.
+Its metadata binds source checksums, selected rows, and the fixed sample manifest.
+A different manifest causes an error. A missing cache uses the source files.
+The cache retains source-entry partitions across GPUs and loader workers.
+The full cohort cache occupies 1.46 GB. A checkpoint evaluation takes 64.4
+seconds with the cache, versus 333.7 seconds from source shards. Both runs
+evaluate all 10,027 samples. The two runs differ by 0.0017% in MAE. CPU tests confirm exact preservation
+of source coordinates and labels.
+
 Validation runs every 100,000 optimizer steps. Every evaluation covers the
 complete fixed cohort. The loader reads only selected atom and Hessian spans.
 Each metric record includes the actual evaluated sample count and a SHA256
@@ -241,7 +258,7 @@ tested workload, so the recommended command omits this option.
 The controlled comparison uses identical starting weights and 442 molecules.
 They contain 38,496 atoms across 24 physical batches. Timings include head
 backward, clipping, and optimizer updates. Compilation and preprocessing are
-measured separately.
+measured separately. These controlled timings exclude source-file loading.
 
 | Mode | Molecules/second |
 | --- | ---: |

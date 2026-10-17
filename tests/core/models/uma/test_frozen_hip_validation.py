@@ -19,6 +19,7 @@ from fairchem.core.frozen_hip.validation import (
     DATA_REVISION,
     EvaluationStream,
     build_manifest,
+    build_validation_cache,
     evaluation_mask,
     load_last_head,
     load_manifest,
@@ -137,3 +138,30 @@ def test_final_evaluation_reloads_last_weights_not_live_or_best_weights(tmp_path
     torch.testing.assert_close(head(torch.ones(1, 2)), torch.tensor([[7.0]]))
     with pytest.raises(ValueError, match="backbone"):
         load_last_head(head, path, "wrong", "cpu")
+
+
+def test_dense_validation_cache_preserves_samples_labels_and_geometry(tmp_path):
+    manifest = cohort_fixture(tmp_path)
+
+    def collect(world):
+        result = {}
+        for rank in range(world):
+            for data in EvaluationStream(tmp_path, manifest, world=world, rank=rank):
+                atoms = data.pos.split(data.natoms.tolist())
+                labels = data.hessian.split([9 * n * n for n in data.natoms.tolist()])
+                for sid, pos, target in zip(data.sid, atoms, labels, strict=True):
+                    assert int(sid) not in result
+                    result[int(sid)] = (pos.clone(), target.clone())
+        return result
+
+    expected = collect(1)
+    build_validation_cache(tmp_path, manifest, workers=2)
+    for world in (1, 2, 5):
+        actual = collect(world)
+        assert actual.keys() == expected.keys()
+        for sid in expected:
+            for got, wanted in zip(actual[sid], expected[sid], strict=True):
+                torch.testing.assert_close(got, wanted, rtol=0, atol=0)
+    manifest["entries"][0]["source_sha256"] = "changed"
+    with pytest.raises(ValueError, match="cache differs"):
+        next(iter(EvaluationStream(tmp_path, manifest)))

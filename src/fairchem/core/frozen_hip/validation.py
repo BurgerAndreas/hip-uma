@@ -22,6 +22,7 @@ from torch.utils.data import IterableDataset, get_worker_info
 
 from fairchem.core.frozen_hip.data import (
     BalancedBatchSampler,
+    make_batch,
     pack_window_batch,
     validation_mask,
 )
@@ -192,6 +193,71 @@ def read_selected(root, entry):
     return values, {"path": entry["path"], "sha256": entry["source_sha256"]}, None
 
 
+def manifest_fingerprint(manifest):
+    """
+    Bind cached arrays to source checksums, selected rows, and sample identities.
+    """
+    return hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _cache_entry(request):
+    root, entry = request
+    return read_selected(root, entry)[0]
+
+
+def build_validation_cache(root, manifest, output=None, workers=8):
+    """
+    Retain original dense labels and coordinates in one portable memory map.
+    """
+    from fairchem.core.frozen_hip.packed import write_packed
+
+    root = Path(root)
+    output = Path(output) if output else root / "validation_10000.hip"
+    parts = []
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        for index, values in enumerate(
+            pool.map(
+                _cache_entry,
+                ((root, entry) for entry in manifest["entries"]),
+                chunksize=8,
+            )
+        ):
+            parts.append(values)
+            if (index + 1) % 500 == 0:
+                print(
+                    f"Cached {index + 1}/{len(manifest['entries'])} sources", flush=True
+                )
+    keys = (
+        "natoms",
+        "omol_index",
+        "atomic_numbers",
+        "coords",
+        "hessian_flat",
+        "charge",
+        "spin",
+    )
+    arrays = {key: np.concatenate([part[key] for part in parts]) for key in keys}
+    sizes = arrays["natoms"]
+    arrays["atom_ptr"] = np.r_[0, np.cumsum(sizes)]
+    arrays["hessian_ptr"] = np.r_[0, np.cumsum(9 * sizes**2)]
+    arrays["entry_ptr"] = np.r_[0, np.cumsum([len(part["natoms"]) for part in parts])]
+    if (
+        len(sizes) != manifest["samples"]
+        or sample_fingerprint(arrays["omol_index"]) != manifest["sample_ids_sha256"]
+    ):
+        raise ValueError("Cached evaluation identities differ from the manifest")
+    write_packed(
+        output,
+        arrays,
+        dict(
+            kind="dense_validation_v1", manifest_sha256=manifest_fingerprint(manifest)
+        ),
+    )
+    return output
+
+
 class EvaluationStream(IterableDataset):
     """
     Evaluate every fixed cohort member exactly once across any GPU count.
@@ -216,6 +282,36 @@ class EvaluationStream(IterableDataset):
         self.pair_budget, self.window_files = pair_budget, window_files
 
     def __iter__(self):
+        cache_path = Path(self.root) / "validation_10000.hip"
+        if cache_path.exists():
+            from fairchem.core.frozen_hip.packed import open_packed
+
+            values, header = open_packed(cache_path)
+            if header.get("kind") != "dense_validation_v1" or header.get(
+                "manifest_sha256"
+            ) != manifest_fingerprint(self.manifest):
+                raise ValueError("Validation cache differs from the fixed manifest")
+            entries = np.arange(len(self.manifest["entries"]))[self.rank :: self.world]
+            worker = get_worker_info()
+            if worker is not None:
+                entries = entries[worker.id :: worker.num_workers]
+            ep = values["entry_ptr"]
+            for start in range(0, len(entries), self.window_files):
+                rows = np.concatenate(
+                    [
+                        np.arange(ep[index], ep[index + 1])
+                        for index in entries[start : start + self.window_files]
+                    ]
+                )
+                sampler = BalancedBatchSampler(
+                    values["natoms"][rows],
+                    max_atoms=self.max_atoms,
+                    batch_size=self.max_batch,
+                    pair_budget=self.pair_budget,
+                )
+                for batch in sampler:
+                    yield make_batch(values, rows[np.asarray(batch)])
+            return
         entries = self.manifest["entries"][self.rank :: self.world]
         worker = get_worker_info()
         if worker is not None:
