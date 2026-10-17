@@ -1,0 +1,406 @@
+{
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "torch": "2.8.0+cu128",
+  "samples": 3327,
+  "updates": 64,
+  "loss": "block-rmse",
+  "sample_order_sha256": "8225d7061e5d71cb77fc81d6ed0ebc3e7aa7db577cfdfabc110ff91fbedfc42d",
+  "feature_preparation_seconds": 4.124996647005901,
+  "checkpoint_step": 12000,
+  "backbone_sha256": "33f9b444901549d42998d40cec167a940e7b1547cfd45caf5080589590610bd2",
+  "cases": [
+    {
+      "mode": "baseline",
+      "seconds": [
+        3.9362086940091103,
+        3.943697726004757,
+        3.9428299330174923
+      ],
+      "samples_s": 843.8101709991355,
+      "step_seconds": 0.06160671770339832,
+      "peak_GB": 45.649147392,
+      "loss": 0.06777342408895493,
+      "loss_relative_error": 0.0,
+      "gradient_relative_l2": 0.0
+    },
+    {
+      "mode": "wigner",
+      "seconds": [
+        3.959524556994438,
+        3.963421056047082,
+        3.9663506090873852
+      ],
+      "samples_s": 839.4263321894402,
+      "step_seconds": 0.061928454000735655,
+      "peak_GB": 45.649152,
+      "loss": 0.06777319312095642,
+      "loss_relative_error": 3.4079434954037424e-06,
+      "gradient_relative_l2": 8.641983731649816e-05
+    },
+    {
+      "mode": "wigner-segmented",
+      "seconds": [
+        3.774920574040152,
+        3.780269378912635,
+        3.779737142031081
+      ],
+      "samples_s": 880.2199399009535,
+      "step_seconds": 0.05905839284423564,
+      "peak_GB": 45.639530496,
+      "loss": 0.06777323782444,
+      "loss_relative_error": 2.748341557889944e-06,
+      "gradient_relative_l2": 9.261020022677258e-05
+    },
+    {
+      "mode": "wigner-scaled",
+      "seconds": [
+        4.9145184099907055,
+        4.913125566905364,
+        4.938853926956654
+      ],
+      "samples_s": 676.9737586569122,
+      "step_seconds": 0.07678935015610477,
+      "peak_GB": 40.49192704,
+      "loss": 0.06777442991733551,
+      "loss_relative_error": 1.4841044503555167e-05,
+      "gradient_relative_l2": 0.0005403142422437668
+    },
+    {
+      "mode": "scaled",
+      "seconds": [
+        4.912691101897508,
+        4.941817801911384,
+        4.922607491025701
+      ],
+      "samples_s": 675.8613206649893,
+      "step_seconds": 0.07691574204727658,
+      "peak_GB": 40.49192704,
+      "loss": 0.06777442991733551,
+      "loss_relative_error": 1.4841044503555167e-05,
+      "gradient_relative_l2": 0.0005450203316286206
+    },
+    {
+      "mode": "baseline",
+      "seconds": [
+        3.9451435969676822,
+        3.9498433209955692,
+        3.9501089069526643
+      ],
+      "samples_s": 842.311891794589,
+      "step_seconds": 0.06171630189055577,
+      "peak_GB": 45.649152,
+      "loss": 0.06777343899011612,
+      "loss_relative_error": 2.1986731724155106e-07,
+      "gradient_relative_l2": 9.633746230974793e-05
+    }
+  ],
+  "measurement_scope": "Cached features prepared before timing; head forward, backward, clipping and optimizer updates included.",
+  "precision_policy": "FP32 state and reductions; TF32 matrix operations. Scaled FP16 kernels remain experimental and disabled by default.",
+  "full_stream": {
+    "first_logged_step": 12300,
+    "last_logged_step": 15800,
+    "windows": 36,
+    "cached_feature_fraction": 0.0,
+    "same_samples_and_atoms": true,
+    "cases": [
+      {
+        "mode": "base",
+        "step_seconds": 0.14623989298752146,
+        "samples_s": 302.3513791623619,
+        "mean_gpu_activity_percent": 89.05009633911368
+      },
+      {
+        "mode": "async",
+        "step_seconds": 0.1385407058600362,
+        "samples_s": 319.1540930793535,
+        "mean_gpu_activity_percent": 94.32688391038697
+      },
+      {
+        "mode": "scatter",
+        "step_seconds": 0.13683211117746802,
+        "samples_s": 323.13930518828613,
+        "mean_gpu_activity_percent": 93.94736842105263
+      },
+      {
+        "mode": "segmented",
+        "step_seconds": 0.13504365416318048,
+        "samples_s": 327.41881584383793,
+        "mean_gpu_activity_percent": 93.95929018789144
+      }
+    ]
+  },
+  "limitations": [
+    "Compilation, feature preparation, queue delays, checkpoint writes and validation are excluded from steady timings.",
+    "Numerical comparisons do not establish equal training convergence.",
+    "Different molecule sizes change throughput; tiny-molecule cache benchmarks do not predict full-corpus speed."
+  ],
+  "radial_head": {
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "torch": "2.8.0+cu128",
+    "samples": 3327,
+    "updates": 64,
+    "loss": "block-rmse",
+    "sample_order_sha256": "8225d7061e5d71cb77fc81d6ed0ebc3e7aa7db577cfdfabc110ff91fbedfc42d",
+    "feature_preparation_seconds": 15.811237026005983,
+    "checkpoint_step": 12000,
+    "backbone_sha256": "33f9b444901549d42998d40cec167a940e7b1547cfd45caf5080589590610bd2",
+    "cases": [
+      {
+        "mode": "baseline",
+        "seconds": [
+          3.9522533020935953,
+          3.9520901390351355,
+          3.951306724920869
+        ],
+        "samples_s": 841.8330258054931,
+        "step_seconds": 0.06175140842242399,
+        "peak_GB": 45.649147392,
+        "loss": 0.06777093559503555,
+        "loss_relative_error": 0.0,
+        "gradient_relative_l2": 0.0
+      },
+      {
+        "mode": "radial",
+        "seconds": [
+          3.9397921469062567,
+          3.955059990286827,
+          3.9445341019891202
+        ],
+        "samples_s": 843.445617144566,
+        "step_seconds": 0.061633345343580004,
+        "peak_GB": 40.756337152,
+        "loss": 0.06777093559503555,
+        "loss_relative_error": 0.0,
+        "gradient_relative_l2": 4.8745598178356886e-05
+      },
+      {
+        "mode": "radial-segmented",
+        "seconds": [
+          3.742880371864885,
+          3.7479137908667326,
+          3.7520084544084966
+        ],
+        "samples_s": 887.6938440013068,
+        "step_seconds": 0.0585611529822927,
+        "peak_GB": 40.746715648,
+        "loss": 0.06777095049619675,
+        "loss_relative_error": 2.198753890070293e-07,
+        "gradient_relative_l2": 3.4767892884701723e-06
+      },
+      {
+        "mode": "baseline",
+        "seconds": [
+          3.9560342938639224,
+          3.986208351328969,
+          3.9491344620473683
+        ],
+        "samples_s": 840.9937206966084,
+        "step_seconds": 0.06181303584162379,
+        "peak_GB": 45.649147392,
+        "loss": 0.06777093559503555,
+        "loss_relative_error": 0.0,
+        "gradient_relative_l2": 8.247554796980694e-05
+      }
+    ]
+  },
+  "radial_fixed_validation": {
+    "samples": 10027,
+    "fingerprint": "0b7992b6d34a058ddfe0d83151bc43af580fe752c9e30f0e2a2cdffd3fdf8089",
+    "checkpoint_step": 12000,
+    "rows": [
+      {
+        "name": "standard",
+        "mae": 0.23301558332708894,
+        "mse": 1.3656180669773985,
+        "samples": 10027,
+        "prediction_relative_l2": 0.0,
+        "compute_seconds": 14.902777587994933
+      },
+      {
+        "name": "radial",
+        "mae": 0.23301649298301552,
+        "mse": 1.3656201393180873,
+        "samples": 10027,
+        "prediction_relative_l2": 0.00018161272065094836,
+        "compute_seconds": 13.218059836886823
+      },
+      {
+        "name": "radial-segmented",
+        "mae": 0.2330157414228809,
+        "mse": 1.3656011459767712,
+        "samples": 10027,
+        "prediction_relative_l2": 0.00018115113825574846,
+        "compute_seconds": 14.922684379387647
+      }
+    ],
+    "seconds": 172.68776610400528
+  },
+  "memory_stress": [
+    {
+      "natoms": 350,
+      "tail_atoms": 0,
+      "molecules": 4,
+      "pairs": 490000,
+      "fits": true,
+      "peak_GB": 39.58876672,
+      "reserved_GB": 44.105203712,
+      "times": [
+        0.21487686305772513,
+        0.2158065919065848,
+        0.21575693099293858
+      ]
+    },
+    {
+      "natoms": 350,
+      "tail_atoms": 0,
+      "molecules": 6,
+      "pairs": 735000,
+      "fits": true,
+      "peak_GB": 58.72418048,
+      "reserved_GB": 65.475182592,
+      "times": [
+        0.32292632199823856,
+        0.32158953498583287,
+        0.3215173629578203
+      ]
+    },
+    {
+      "natoms": 350,
+      "tail_atoms": 0,
+      "molecules": 7,
+      "pairs": 857500,
+      "fits": true,
+      "peak_GB": 68.301243904,
+      "reserved_GB": 76.170657792,
+      "times": [
+        0.3773589259944856,
+        0.37688882497604936,
+        0.3759288149885833
+      ]
+    },
+    {
+      "natoms": 350,
+      "tail_atoms": 110,
+      "molecules": 8,
+      "pairs": 869600,
+      "fits": true,
+      "peak_GB": 69.245262336,
+      "reserved_GB": 77.219233792,
+      "times": [
+        0.3830270360922441,
+        0.38061761495191604,
+        0.38266671809833497
+      ]
+    }
+  ],
+  "feature_cache": {
+    "event": "full_feature_cache_verified",
+    "namespace": "33f9b444901549d42998d40cec167a940e7b1547cfd45caf5080589590610bd2-tf32-geometry1-backbonefp16-grouped-expertout32-radius4-fusedbody",
+    "bundles": 5239,
+    "expected_bundles": 5239,
+    "training_samples": 9900330,
+    "min_natoms": 2,
+    "max_natoms": 350,
+    "total_atoms": 443614295,
+    "feature_bytes": 2044174671360,
+    "missing_bundles": [],
+    "inventory_sha256": "eeb8512d3071b0e098dfc1b14885e8a221e38d6a9a395247fb95be30a91ec0ea",
+    "source_identity_verified": true,
+    "finite_on_publication": true,
+    "seconds": 236.4861194229452
+  },
+  "checkpoint_cost": {
+    "event": "checkpoint_cost",
+    "backbone_parameters": 291251904,
+    "backbone_bytes": 1165007616,
+    "checkpoint_bytes": 34884303,
+    "hash_seconds": [
+      0.970260001020506,
+      0.9693556679994799,
+      0.9722657999955118
+    ],
+    "save_seconds": [
+      0.04301018203841522,
+      0.04593823401955888,
+      0.05038092198083177
+    ],
+    "hash_median": 0.970260001020506,
+    "save_median": 0.04593823401955888
+  },
+  "final_full_trainer": {
+    "first_logged_step": 12300,
+    "last_logged_step": 13500,
+    "updates_per_window": 100,
+    "windows": 13,
+    "same_molecule_and_atom_counts": true,
+    "reference": "cached-base-repeat",
+    "cases": [
+      {
+        "mode": "cached-base",
+        "seconds_per_update": 0.10091666749848698,
+        "molecules_per_second": 486.7610961593057,
+        "peak_allocated_GB": 47.079172096,
+        "mean_microbatches_per_update": 1.0423076923076924,
+        "gpu_activity_mean_percent": 66.53488372093024
+      },
+      {
+        "mode": "cached-fast524",
+        "seconds_per_update": 0.06490919791851552,
+        "molecules_per_second": 756.7850053234972,
+        "peak_allocated_GB": 42.047424,
+        "mean_microbatches_per_update": 1.0423076923076924,
+        "gpu_activity_mean_percent": 99.5
+      },
+      {
+        "mode": "cached-fast900",
+        "seconds_per_update": 0.0674390954115034,
+        "molecules_per_second": 728.3951155123098,
+        "peak_allocated_GB": 67.826152448,
+        "mean_microbatches_per_update": 1.0,
+        "gpu_activity_mean_percent": 95.47674418604652
+      },
+      {
+        "mode": "cached-base-repeat",
+        "seconds_per_update": 0.07130617706297646,
+        "molecules_per_second": 688.8927399504768,
+        "peak_allocated_GB": 47.079172096,
+        "mean_microbatches_per_update": 1.0423076923076924,
+        "gpu_activity_mean_percent": 95.1584699453552
+      },
+      {
+        "mode": "online-base",
+        "seconds_per_update": 0.1207139108445979,
+        "molecules_per_second": 406.93162327866025,
+        "peak_allocated_GB": 47.070403072,
+        "mean_microbatches_per_update": 1.0423076923076924,
+        "gpu_activity_mean_percent": 89.05194805194805
+      }
+    ],
+    "selection": "cached-fast524",
+    "notes": [
+      "The first cached baseline includes cold cache or compilation effects; use its repeated run as the warm reference.",
+      "Feature preparation, validation, scheduler delays and production checkpoint costs remain separate."
+    ]
+  },
+  "production_policy": {
+    "gpus_per_run": 1,
+    "target_steps": 2000000,
+    "losses": [
+      "mae",
+      "block-rmse"
+    ],
+    "max_batch": 64,
+    "max_atoms": 2560,
+    "microbatch_pairs": 524288,
+    "head_precision": "fp32",
+    "matrix_precision": "tf32",
+    "fused_radial": true,
+    "segmented_scatter": true,
+    "device_prefetch": true,
+    "async_grad_check": true,
+    "checkpoint_every": 5000,
+    "validate_every": 100000,
+    "validation_samples": 10027,
+    "final_checkpoint": "latest.pt"
+  }
+}

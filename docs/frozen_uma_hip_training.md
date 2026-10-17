@@ -490,3 +490,202 @@ runs in parallel. The complete FP32 feature cache needs about 2.04 TB.
 The safe path passes evaluation on all 10,027 fixed samples and the previously
 failing dimer batch. Cache checks verify 53,880 finite samples and successful
 reuse without recomputation. Production training remains a separate action.
+
+## Additional kernel and input optimizations
+
+`--segmented-scatter` combines inverse Wigner rotation and node accumulation.
+It reduces target-sorted messages without atomics or a wide rotated intermediate.
+Its backward kernel combines the corresponding gradient gather and rotation.
+Use it with `--fused-rotations` and a complete intramolecular HIP graph.
+`--fused-scatter` provides an atomic alternative for other edge orderings.
+Geometry derivatives use the original implementation.
+
+The rotation gather uses 64-channel tiles. Inverse rotation keeps 128-channel tiles.
+Launch grids adapt to small edge counts. Captured rotation outputs remain bitwise identical.
+Gather kernel measurements improve by 10–15%. These figures describe individual kernels, not full training.
+
+`--async-grad-check` checks the gradient norm on the GPU before the optimizer update.
+It removes a CPU synchronization from each update. Nonfinite gradients still stop training.
+`--prefetch-factor 8` buffers more host batches per loader worker.
+Dense HIP heads also skip unused expert-routing transfers.
+The balanced sampler retains its original ordering and exact sample coverage.
+A 20,000-molecule packing test reduces CPU time from 0.95 seconds to 0.017 seconds.
+This packing improvement does not represent a full-training speedup.
+
+One matched full-stream test covers 3,600 optimizer updates after warmup.
+All modes use the same molecules, atom counts, and uncached frozen inference.
+
+| Mode | Molecules/s | Seconds/update | Mean GPU activity |
+| --- | ---: | ---: | ---: |
+| Previous configuration | 302.4 | 0.14624 | 89.1% |
+| GPU gradient check | 319.2 | 0.13854 | 94.3% |
+| Gradient check and fused atomic accumulation | 323.1 | 0.13683 | 93.9% |
+| Gradient check and fused segmented accumulation | 327.4 | 0.13504 | 94.0% |
+
+The final row improves throughput by 8.3% on this sequence.
+Feature preparation can remove frozen inference from subsequent training updates.
+Shared hardware and molecular sizes affect measured times.
+See `frozen_hip_kernel_benchmark.json` for controlled measurements and limitations.
+
+`--scaled-linear` tests power-of-two scaled FP16 matrix operands with FP32 outputs.
+Parameters, gradients, optimizer state, and reductions remain FP32.
+The implementation protects long weight-gradient reductions from FP16 overflow.
+A compiler wrapper supports the FP32 output API on older compiler versions.
+This mode saves about 5.2 GB in the controlled head benchmark.
+It reduces throughput by about 20%, so the recommended speed configuration disables it.
+
+`--fused-wigner` tests a compact quartic polynomial kernel for frozen geometry.
+It reduces the polynomial basis from 256 redundant products to 35 monomials.
+It also calculates the inverse rotation envelope.
+The full fixed cohort changes MAE by approximately 0.005% at the tested checkpoint.
+The standalone head benchmark shows no speed gain. Keep this option experimental.
+
+## MAE comparison and long experiments
+
+`--loss mae` uses equal-geometry averaging of Cartesian absolute errors.
+Packed labels remain symmetrized. Independent off-diagonal blocks receive weight two.
+Diagonal blocks include all nine components. Exact agreement gives a zero gradient.
+The fused kernel avoids dense Hessian reconstruction and retains FP32 arithmetic.
+MAE and block RMSE share the same molecular weights and packed label format.
+
+Use separate output directories for the two losses. Both experiments can start from the same seed.
+Checkpoints record the initial head checksum and the target step count.
+Set `CODE_REVISION` to the committed Git revision. Checkpoints also record this revision.
+Resume rejects a different target step count during production training.
+
+`scripts/train_frozen_hip_segment.sh` supports experiments longer than one scheduler allocation.
+It reads private paths and scheduler settings from environment variables.
+Each allocation resumes `latest.pt` and retains the original optimizer schedule.
+One dependent successor waits for successful completion of the current allocation.
+The script queues that successor before training starts. It never polls scheduler status.
+A controller outage therefore does not remove an accepted successor.
+If submission fails, the script tries once after saving the completed segment.
+
+Set these variables in a private scheduler wrapper:
+
+```bash
+export PYTHON_BIN CODE_ROOT DATA_ROOT PACKED_ROOT RUN_ROOT LOSS_NAME
+export FEATURE_CACHE_ROOT CONTINUATION_SCRIPT
+export TARGET_STEPS=2000000
+export SEGMENT_SECONDS=13200
+export ASYNC_GRAD_CHECK=1
+export SEGMENTED_SCATTER=1
+bash "$CODE_ROOT/scripts/train_frozen_hip_segment.sh"
+```
+
+`CONTINUATION_SCRIPT` points to that private scheduler wrapper.
+The wrapper must request one GPU and provide the required environment.
+It must include its account, partition, time, and memory settings for successor submissions.
+The default batch cap is 64 molecules, with an atom target of 2,560.
+`MICROBATCH_PAIRS` changes only the physical GPU work limit.
+It preserves the global batch and equal-geometry loss weights.
+`MAX_SEGMENTS` defaults to 128 allocations as a continuation limit.
+
+An allocation lock prevents concurrent updates to one experiment.
+A `STOP` file prevents further training and cancels its queued successor.
+Termination signals request a checkpoint. Scheduler requeues replace dependencies that an earlier failure can invalidate.
+Repeated starts within one allocation reuse its accepted successor.
+An explicit `STOP` file ends continuation. Failed training does not advance its dependency chain.
+After two million updates, training reloads its last checkpoint for final evaluation.
+Validation retains the fixed 10,027-sample cohort and 100,000-update interval.
+Completed experiments cancel their unused successor and reject duplicate execution.
+
+The allocation script saves every 5,000 updates. `CHECKPOINT_EVERY` can change this interval.
+Hashing the 1.17 GB frozen backbone takes approximately one second in the measured environment.
+Saving the 35 MB head and optimizer takes approximately 0.05 seconds.
+The larger interval reduces checkpoint overhead. Signals and allocation endings still request an immediate checkpoint.
+
+A preparation inventory can restrict workers to unfinished bundles:
+
+```bash
+python tools/cache_packed_hip_features.py \
+  --packed-data "$PACKED_ROOT" --feature-cache "$FEATURE_CACHE_ROOT" \
+  --inventory "$INVENTORY_JSON" --workers 0 --window-files 1 \
+  --tf32 --backbone-precision fp16 --backbone-graph-version 4 \
+  --grouped-mole --fused-backbone --rank "$PREP_RANK" --world "$PREP_WORLD"
+```
+
+The inventory contains a fixed JSON list of relative `.hip` filenames.
+Every worker must use the same inventory and worker count.
+This permits disjoint repair passes without repeating completed preparation.
+Zero loader workers avoid multiprocessing tensor transfers during repair.
+A one-file window limits incomplete feature arrays.
+Progress records follow processed-sample counts. They do not query scheduler status.
+
+### Fused radial messages and the complete feature cache
+
+`--fused-radial` combines node gathering, Wigner rotation, and radial weighting.
+Its backward kernel recomputes rotations from node features.
+It avoids storing the complete unweighted edge tensor.
+Geometry, message arithmetic, gradients, and reductions remain FP32.
+The full fixed cohort changes MAE by less than 0.001% at the tested checkpoint.
+
+A controlled 3,327-molecule comparison gives these results:
+
+| Mode | Molecules/s | Peak allocated GB |
+| --- | ---: | ---: |
+| Reference compiled head | 841.8 | 45.65 |
+| Fused radial messages | 843.4 | 40.76 |
+| Fused radial messages and segmented accumulation | 887.7 | 40.75 |
+| Reference repeat | 841.0 | 45.65 |
+
+The radial kernel saves approximately 4.9 GB while retaining throughput.
+The combined configuration improves controlled head throughput by approximately 5.5%.
+Numerical comparisons do not establish equal training convergence.
+
+The prepared cache covers all 9,900,330 training samples across 5,239 bundles.
+It stores 2.04 TB of FP32 features for 443,614,295 atoms.
+Verification checks each source identity, array shape, and publication record.
+The complete training split contains between two and 350 atoms per geometry.
+Training reads complete caches without running the frozen backbone again.
+Validation continues to recompute its own features.
+
+On the tested 80 GB GPU, the complete atom budget fits one physical update.
+Seven 350-atom geometries and one 110-atom fragment use 2,560 atoms.
+Their squared atom counts sum to 869,600.
+The stress test uses AdamW and the fused FP32 head.
+It peaks at 69.25 GB allocated and 77.22 GB reserved.
+The fragment serves only as a memory stress input.
+A work limit of 900,000 therefore covers the verified production atom budget.
+It retains the global cap of 64 geometries and the balanced atom sampler.
+It requires no gradient accumulation for this verified dataset and configuration.
+
+The production work limit remains 524,288. This setting gives higher measured throughput and leaves more memory free.
+Large logical batches use gradient accumulation. Their global loss weights remain unchanged.
+
+For the allocation wrapper, use:
+
+```bash
+export MICROBATCH_PAIRS=524288
+export FUSED_RADIAL=1
+export SEGMENTED_SCATTER=1
+export DEVICE_PREFETCH=1
+export ASYNC_GRAD_CHECK=1
+```
+
+Device prefetch transfers one logical batch on a separate CUDA stream.
+Stream events protect tensor lifetimes. It does not change sample order or loss weights.
+The buffered batch adds input storage. The head retains its physical work limit.
+
+
+### Final matched training measurement
+
+Thirteen matched windows cover steps 12,300 through 13,500, with 100 updates per window.
+Every mode processes the same molecules and atoms.
+
+| Mode | Molecules/s | Seconds/update | Peak allocated GB |
+| --- | ---: | ---: | ---: |
+| Frozen inference during training | 406.9 | 0.12071 | 47.07 |
+| Prepared features, warm reference | 688.9 | 0.07131 | 47.08 |
+| Prepared features and selected kernels | 756.8 | 0.06491 | 42.05 |
+| Larger physical work limit | 728.4 | 0.06744 | 67.83 |
+
+The selected configuration improves throughput by 9.9% against the warm cached reference.
+It gives 1.86 times the throughput of the online reference.
+The first cached reference includes cold effects and does not define the speedup.
+The selected configuration records 99.5% mean GPU activity during its measured interval.
+GPU activity does not measure the fraction of peak arithmetic throughput.
+
+Two million updates need about 36 hours of measured update time at this rate.
+Feature preparation, checkpoint costs, validation, compilation, and scheduler delays add time.
+The two losses can have different update times during actual training.
