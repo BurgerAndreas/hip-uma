@@ -134,12 +134,24 @@ def test_successor_is_queued_before_training_and_resumes_exact_target(allocation
     assert args[args.index("--steps") + 1] == "2000000"
     assert args[args.index("--loss") + 1] == "mae"
     assert args[args.index("--validate-every") + 1] == "100000"
+    assert args[args.index("--weight-decay") + 1] == "0.0001"
     assert read_lines(run / "events.jsonl") == ["submit_ok", "train"]
     submission = read_lines(run / "submissions.jsonl")[0]
     assert submission["segment"] == "1"
     assert "--dependency=afterok:1234" in submission["args"]
     assert "--kill-on-invalid-dep=yes" in submission["args"]
     assert (run / "next_job_id").read_text().strip() == "5555"
+
+
+def test_zero_weight_decay_reaches_trainer_and_successor(allocation):
+    run, env = allocation
+    result = invoke({**env, "WEIGHT_DECAY": "0"})
+    assert result.returncode == 0, result.stderr
+    args = json.loads((run / "arguments.json").read_text())
+    assert args[args.index("--weight-decay") + 1] == "0"
+    submission = read_lines(run / "submissions.jsonl")[0]
+    assert "--export=ALL" in submission["args"]
+    assert submission["segment"] == "1"
 
 
 def test_completion_cancels_successor_and_future_allocations_skip_training(allocation):

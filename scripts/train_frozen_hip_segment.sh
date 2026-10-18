@@ -96,6 +96,7 @@ export PYTHONPATH="$CODE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 args=(
     --data "$DATA_ROOT" --packed-data "$PACKED_ROOT" --output "$RUN_ROOT"
     --loss "$LOSS_NAME" --steps "$TARGET_STEPS" --duration "$SEGMENT_SECONDS"
+    --weight-decay "${WEIGHT_DECAY:-0.0001}"
     --max-batch 64 --max-atoms 2560 --microbatch-pairs "${MICROBATCH_PAIRS:-524288}"
     --workers "${LOADER_WORKERS:-2}" --window-shards 8
     --tf32 --backbone-precision fp16 --head-precision fp32

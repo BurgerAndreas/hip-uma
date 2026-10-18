@@ -51,6 +51,7 @@ def parse_args():
     p.add_argument("--steps", type=int, default=200000)
     p.add_argument("--duration", type=float, default=13200)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--loss", choices=("mse", "mae", "block-rmse"), default="mse")
     p.add_argument("--profile-steps", type=int, default=0)
     p.add_argument("--profile-after", type=int, default=100)
@@ -121,6 +122,8 @@ def parse_args():
     p.add_argument("--stop-file", type=Path)
     p.add_argument("--refresh-data-every", type=int, default=2000)
     args = p.parse_args()
+    if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
+        p.error("--weight-decay must be finite and nonnegative")
     if args.prefetch_factor < 1:
         p.error("Prefetch count must be positive")
     if args.segmented_scatter:
@@ -275,7 +278,7 @@ def main():
                 head.edge_readout.forward_messages, dynamic=True
             )
     optimizer = torch.optim.AdamW(
-        head.parameters(), lr=args.lr, weight_decay=1e-4, fused=True
+        head.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True
     )
     initial_head_hash = parameter_hash(head)
     step = 0
@@ -314,6 +317,11 @@ def main():
             raise ValueError("Checkpoint step target differs from this experiment")
         if not args.eval_only:
             optimizer.load_state_dict(state["optimizer"])
+            if any(
+                group["weight_decay"] != args.weight_decay
+                for group in optimizer.param_groups
+            ):
+                raise ValueError("Checkpoint weight decay differs from this experiment")
         step = state["step"]
     if world > 1:
         # Synchronize the small trainable head, never the frozen backbone.
@@ -528,6 +536,7 @@ def main():
         checkpoint = {
             "step": step,
             "target_steps": args.steps,
+            "weight_decay": args.weight_decay,
             "initial_head_sha256": initial_head_hash,
             "code_revision": args.code_revision,
             "head": head.state_dict(),

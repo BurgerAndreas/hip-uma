@@ -720,3 +720,9 @@ A coverage check verifies the complete fixed cohort before results are published
 The existing Cartesian metrics remain available under their original names.
 Validation still runs every 100,000 updates on the same 10,027 geometries.
 Final evaluation still reloads `latest.pt`.
+
+Weight decay is configurable with `--weight-decay` (default `1e-4`). The
+allocation runner accepts `WEIGHT_DECAY=0` for a zero-decay ablation and passes
+it to each successor. Use a separate output directory and the original seed
+for a fresh comparison. Resume rejects optimizer states with different decay.
+The run configuration and checkpoints record the selected decay.
