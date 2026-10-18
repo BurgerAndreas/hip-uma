@@ -589,6 +589,11 @@ def main():
         )
 
     def evaluate(*, final=False):
+        from fairchem.core.frozen_hip.metrics import (
+            mass_weighted_eckart_totals,
+            projected_metric_record,
+        )
+
         model.eval()
         stream = EvaluationStream(
             args.data,
@@ -600,6 +605,7 @@ def main():
             pair_budget=args.microbatch_pairs,
         )
         val = torch.zeros(4, device=device, dtype=torch.float64)
+        projected = torch.zeros(6, device=device, dtype=torch.float64)
         seen = []
         with torch.no_grad():
             val_loader = DataLoader(
@@ -617,6 +623,13 @@ def main():
                 seen.extend(int(sid) for sid in host_data.sid)
                 data = move(host_data)
                 prediction = predict(data).float().reshape(-1)
+                projected += mass_weighted_eckart_totals(
+                    prediction,
+                    data.hessian,
+                    data.pos,
+                    data.atomic_numbers,
+                    data.hip_sizes,
+                )
                 error = prediction - data.hessian
                 parts = error.split([9 * n * n for n in data.hip_sizes])
                 val += torch.stack(
@@ -631,6 +644,7 @@ def main():
         identities = [seen]
         if world > 1:
             dist.all_reduce(val)
+            dist.all_reduce(projected)
             identities = [None] * world
             dist.all_gather_object(identities, seen)
         ids = [value for partition in identities for value in partition]
@@ -641,6 +655,7 @@ def main():
             or fingerprint != cohort["sample_ids_sha256"]
         ):
             raise ValueError("Evaluated samples differ from the fixed cohort")
+        projected_record = projected_metric_record(projected, cohort["samples"])
         values = val.cpu().tolist()
         if rank == 0:
             row = dict(
@@ -654,6 +669,7 @@ def main():
                 sample_ids_sha256=fingerprint,
                 from_last_checkpoint=final,
             )
+            row.update(projected_record)
             if final:
                 row["checkpoint"] = "latest.pt"
                 row["checkpoint_sha256"] = hashlib.sha256(

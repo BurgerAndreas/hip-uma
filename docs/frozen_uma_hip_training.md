@@ -689,3 +689,34 @@ GPU activity does not measure the fraction of peak arithmetic throughput.
 Two million updates need about 36 hours of measured update time at this rate.
 Feature preparation, checkpoint costs, validation, compilation, and scheduler delays add time.
 The two losses can have different update times during actual training.
+
+## Mass-weighted, Eckart-projected validation metrics
+
+Every validation and final evaluation records four additional metrics:
+
+- `mass_weighted_eckart_abs_cos_v1`
+- `mass_weighted_eckart_eigenvalue_mae`
+- `mass_weighted_eckart_hessian_mae`
+- `mass_weighted_eckart_hessian_rmse`
+
+The evaluator symmetrizes both Hessians and applies inverse square-root atomic masses.
+It removes rigid translations and rotations with an SVD of the mass-weighted geometric generators.
+Linear molecules have five rigid modes. Nonlinear molecules have six.
+All projection and eigenspectrum calculations use FP64.
+
+The Hessian errors use the complete projected Cartesian matrices, with shape `3N × 3N`.
+They use `P M^(-1/2) H M^(-1/2) P`, where `P` removes the rigid modes.
+Hessian RMSE takes one square root over each complete matrix.
+The evaluator then averages each metric equally across geometries.
+Eigenvalue MAE first averages sorted vibrational eigenvalue errors within each geometry.
+The first mode has the lowest algebraic eigenvalue, including negative eigenvalues.
+The cosine uses its absolute value to remove eigenvector sign ambiguity.
+
+Eigenvalue MAE, Hessian MAE, and Hessian RMSE use `eV/(Angstrom^2*amu)`.
+The records identify the matrix frame, precision, averaging, and eligible sample counts.
+Geometries without vibrational modes receive an explicit count and do not enter these means.
+A coverage check verifies the complete fixed cohort before results are published.
+
+The existing Cartesian metrics remain available under their original names.
+Validation still runs every 100,000 updates on the same 10,027 geometries.
+Final evaluation still reloads `latest.pt`.
