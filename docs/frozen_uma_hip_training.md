@@ -744,3 +744,12 @@ The fused FP32 loss applies mass factors directly to block weights in both
 forward and backward kernels. It retains packed targets and avoids dense
 mass-weighted Hessian allocation. No epsilon or geometry-dependent
 renormalization changes the objective. The loss unit is eV/(Angstrom^2*amu).
+
+Optional loader throughput switches preserve the sampled geometries and FP32
+features. `--threaded-prefetch` moves host retrieval and asynchronous device
+transfers to a bounded background producer. It requires `--device-prefetch`.
+`--fast-packed-loader` gathers cached fragments directly into one batch instead
+of constructing and concatenating intermediate AtomicData objects. Cache-writer
+metadata and uncached inputs retain the original packing path. The allocation
+runner exposes `THREADED_PREFETCH=1` and `FAST_PACKED_LOADER=1`. Enable these
+switches only after matched throughput and correctness checks on the workload.

@@ -159,6 +159,79 @@ def make_packed_batch(
     return data
 
 
+def pack_cached_window(window, references, *, include_targets=True):
+    """Gather cached rows once, retaining the original bundle grouping order."""
+    grouped = {}
+    for source, row in references:
+        grouped.setdefault(source, []).append(row)
+    if any(
+        "features" not in window[source][0] or "_cache_meta" in window[source][1]
+        for source in grouped
+    ):
+        return pack_packed_window(window, references, include_targets=include_targets)
+    sizes, positions, cells, numbers, features = [], [], [], [], []
+    pairs, diagonals, asymmetry, charge, spin, sid, scales = [], [], [], [], [], [], []
+    for source, rows in grouped.items():
+        values, header = window[source]
+        for row in rows:
+            lo, hi = values["atom_ptr"][row : row + 2]
+            n = int(hi - lo)
+            sizes.append(n)
+            xyz = values["coords"][lo:hi].astype(np.float64)
+            low = xyz.min(axis=0)
+            positions.append((xyz - low + 120.0).astype(np.float32))
+            cells.append(np.diag(xyz.max(axis=0) - low + 240.0).astype(np.float32))
+            numbers.append(values["atomic_numbers"][lo:hi])
+            features.append(values["features"][lo:hi])
+            charge.append(values["charge"][row])
+            spin.append(values["spin"][row])
+            sid.append(str(values["omol_index"][row]))
+            scales.append(header.get("feature_scale", 1.0))
+            if include_targets:
+                pl, ph = values["pair_ptr"][row : row + 2]
+                pairs.append(values["pair_targets"][pl:ph])
+                diagonals.append(values["diagonal_targets"][lo * 6 : hi * 6])
+                asymmetry.append(values["asymmetry_mse"][row])
+    sizes = np.asarray(sizes, dtype=np.int64)
+    count, atoms = len(sizes), int(sizes.sum())
+    data = AtomicData(
+        pos=torch.from_numpy(np.concatenate(positions)),
+        atomic_numbers=torch.from_numpy(np.concatenate(numbers).astype(np.int64)),
+        cell=torch.from_numpy(np.stack(cells)),
+        pbc=torch.zeros(count, 3, dtype=torch.bool),
+        natoms=torch.from_numpy(sizes),
+        edge_index=torch.empty(2, 0, dtype=torch.long),
+        cell_offsets=torch.empty(0, 3),
+        nedges=torch.zeros(count, dtype=torch.long),
+        charge=torch.from_numpy(np.asarray(charge, dtype=np.int64)),
+        spin=torch.from_numpy(np.asarray(spin, dtype=np.int64)),
+        fixed=torch.zeros(atoms, dtype=torch.long),
+        tags=torch.ones(atoms, dtype=torch.long),
+        batch=torch.from_numpy(np.repeat(np.arange(count, dtype=np.int64), sizes)),
+        dataset=["omol"] * count,
+        sid=sid,
+    )
+    data.hip_atom_ptr = torch.from_numpy(np.r_[0, np.cumsum(sizes)])
+    data.hip_edge_ptr = torch.from_numpy(np.r_[0, np.cumsum(sizes * (sizes - 1))])
+    data.hip_pair_ptr = data.hip_edge_ptr * 9 // 2
+    data.hip_fused_graph = True
+    data.hip_features = torch.from_numpy(np.concatenate(features))
+    data.hip_feature_scale = (
+        scales[0]
+        if len(set(scales)) == 1
+        else torch.from_numpy(
+            np.repeat(np.asarray(scales, dtype=np.float32), sizes).reshape(-1, 1, 1)
+        )
+    )
+    if include_targets:
+        data.hip_pair_targets = torch.from_numpy(np.concatenate(pairs))
+        data.hip_diagonal_targets = torch.from_numpy(np.concatenate(diagonals))
+        data.hip_asymmetry_mse = torch.from_numpy(
+            np.asarray(asymmetry, dtype=np.float32)
+        )
+    return data
+
+
 def pack_packed_window(window, references, *, include_targets=True):
     """
     Mix bundle sizes before packing, while preserving every row's labels.
@@ -357,6 +430,7 @@ class PackedHessianStream(IterableDataset):
         logical_pair_budget=1000000000,
         include_targets=True,
         include_cache_metadata=True,
+        fast_packing=False,
     ):
         super().__init__()
         self.root, self.markers = Path(root), markers
@@ -369,6 +443,7 @@ class PackedHessianStream(IterableDataset):
         self.logical_pair_budget = logical_pair_budget
         self.include_targets = include_targets
         self.include_cache_metadata = include_cache_metadata
+        self.fast_packing = fast_packing
         if window_files < 1:
             raise ValueError("Packed window size must be positive")
         self.window_files, self.max_passes = window_files, max_passes
@@ -475,7 +550,11 @@ class PackedHessianStream(IterableDataset):
                 rng.shuffle(batches)
                 for batch in batches:
                     yield [
-                        pack_packed_window(
+                        (
+                            pack_cached_window
+                            if self.fast_packing
+                            else pack_packed_window
+                        )(
                             window,
                             [references[i] for i in indices],
                             include_targets=self.include_targets,

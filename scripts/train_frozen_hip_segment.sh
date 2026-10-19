@@ -115,6 +115,8 @@ if [[ "${SEGMENTED_SCATTER:-0}" == 1 ]]; then args+=(--segmented-scatter); fi
 if [[ "${FUSED_WIGNER:-0}" == 1 ]]; then args+=(--fused-wigner); fi
 if [[ "${ASYNC_GRAD_CHECK:-0}" == 1 ]]; then args+=(--async-grad-check); fi
 if [[ "${DEVICE_PREFETCH:-0}" == 1 ]]; then args+=(--device-prefetch); fi
+if [[ "${THREADED_PREFETCH:-0}" == 1 ]]; then args+=(--threaded-prefetch); fi
+if [[ "${FAST_PACKED_LOADER:-0}" == 1 ]]; then args+=(--fast-packed-loader); fi
 if [[ "${FUSED_RADIAL:-0}" == 1 ]]; then args+=(--fused-radial); fi
 if [[ -n "${CODE_REVISION:-}" ]]; then args+=(--code-revision "$CODE_REVISION"); fi
 

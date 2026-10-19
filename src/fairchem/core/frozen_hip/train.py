@@ -58,6 +58,8 @@ def parse_args():
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--prefetch-factor", type=int, default=8)
     p.add_argument("--device-prefetch", action="store_true")
+    p.add_argument("--threaded-prefetch", action="store_true")
+    p.add_argument("--fast-packed-loader", action="store_true")
     p.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
         "--pair-budget",
@@ -124,6 +126,8 @@ def parse_args():
     args = p.parse_args()
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         p.error("--weight-decay must be finite and nonnegative")
+    if args.threaded_prefetch and not args.device_prefetch:
+        p.error("Threaded prefetch requires device prefetch")
     if args.prefetch_factor < 1:
         p.error("Prefetch count must be positive")
     if args.segmented_scatter:
@@ -369,6 +373,7 @@ def main():
                 window_files=args.window_shards,
                 feature_cache=cache_root,
                 include_cache_metadata=not args.feature_cache_read_only,
+                fast_packing=args.fast_packed_loader,
             )
         else:
             stream = HessianStream(
@@ -483,9 +488,15 @@ def main():
     def device_iterator(source):
         if not args.device_prefetch:
             return source
-        from fairchem.core.frozen_hip.prefetch import DeviceBatchPrefetcher
+        from fairchem.core.frozen_hip.prefetch import (
+            DeviceBatchPrefetcher,
+            ThreadedDeviceBatchPrefetcher,
+        )
 
-        return DeviceBatchPrefetcher(source, move, device)
+        prefetcher = (
+            ThreadedDeviceBatchPrefetcher if args.threaded_prefetch else DeviceBatchPrefetcher
+        )
+        return prefetcher(source, move, device)
 
     if train_iter is not None:
         train_iter = device_iterator(train_iter)

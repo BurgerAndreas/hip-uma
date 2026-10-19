@@ -275,3 +275,44 @@ def test_embedded_features_reject_changed_backbone_operations(
     )
     with pytest.raises(ValueError, match=message):
         next(iter(stream))
+
+
+@pytest.mark.parametrize("include_targets", [False, True])
+@pytest.mark.parametrize("scales", [(1.0, 1.0), (0.5, 2.0)])
+def test_single_pass_cached_packing_preserves_every_tensor(include_targets, scales):
+    from fairchem.core.frozen_hip.packed import pack_cached_window, pack_packed_window
+
+    window = []
+    for source, ns in enumerate(([2, 1, 3], [1, 5, 2])):
+        sizes = np.asarray(ns, dtype=np.int64)
+        total = int(sizes.sum())
+        pairs = np.r_[0, np.cumsum(9 * sizes * (sizes - 1) // 2)]
+        values = dict(
+            natoms=sizes,
+            atom_ptr=np.r_[0, np.cumsum(sizes)],
+            pair_ptr=pairs,
+            atomic_numbers=np.arange(total, dtype=np.int64) + 1,
+            coords=np.arange(total * 3, dtype=np.float32).reshape(total, 3) * 0.3,
+            charge=np.arange(3, dtype=np.int64) - 1,
+            spin=np.ones(3, dtype=np.int64),
+            omol_index=np.arange(3) + 10 * source,
+            features=np.arange(total * 36, dtype=np.float32).reshape(total, 9, 4),
+        )
+        if include_targets:
+            values.update(
+                pair_targets=np.arange(pairs[-1], dtype=np.float32),
+                diagonal_targets=np.arange(6 * total, dtype=np.float32),
+                asymmetry_mse=np.arange(3, dtype=np.float32),
+            )
+        window.append((values, dict(feature_scale=scales[source])))
+    # Interleave sources and reorder rows to check the original grouping contract.
+    references = [(1, 1), (0, 2), (1, 0), (0, 0), (1, 2)]
+    expected = pack_packed_window(window, references, include_targets=include_targets)
+    actual = pack_cached_window(window, references, include_targets=include_targets)
+    assert set(actual.keys()) == set(expected.keys())
+    for key, b in expected:
+        a = actual[key]
+        if torch.is_tensor(b):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+        else:
+            assert a == b
