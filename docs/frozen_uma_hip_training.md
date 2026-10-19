@@ -789,3 +789,30 @@ trainer's normal checkpoint identity and optimizer checks.
 runner (default `8`). A deeper queue can overlap the next shard window's reads
 with more GPU updates. Keep the worker count fixed when comparing sample order,
 and budget host memory for both staged windows and queued logical batches.
+
+Storage and loader measurements on an 80 GiB Ampere GPU used identical batch
+identities, atom counts, targets, and FP32 head parameters within each cohort.
+The balanced atom target stayed at 2,560, with a 64-geometry cap and a 524,288
+quadratic work limit. A second cohort reversed the test order on another node.
+Two hundred startup updates were excluded. Any later 100-update window with a
+GPU step span above one second was excluded from every run in that cohort,
+so lazy compilation and allocation stalls did not enter the steady comparison.
+Raw timing records retained those windows separately.
+
+| Cohort and storage condition | Setup | Samples/s | Host batch wait, ms/update |
+| --- | --- | ---: | ---: |
+| First cohort, storage-sensitive control | Original loader | 511 | 67.24 |
+| First cohort, after staging | Background loader, depth 32 | 880 | 0.31 |
+| First cohort, warmed control | Original loader | 837 | 3.92 |
+| Reversed cohort, fresh reads | Staging, depth 64 | 801 | 4.05 |
+| Reversed cohort, warmed control | Original loader | 853 | 0.48 |
+
+These numbers show strong cache dependence rather than a uniform speedup.
+The selected storage profile stages at most 4 GiB per worker, uses two workers,
+a host prefetch depth of 64, background device transfer, and single-pass cached
+packing. Runtime libraries and generated kernels use local storage. Isolated
+larger radial tiles improved individual kernels, but complete-step measurements
+did not show a consistent additional gain; the selected radial tile stays 64.
+The data profile adds at most 8 GiB of staged private host memory, plus queued
+batches. Measured peak GPU allocation stayed near 41.6 GB in the reversed cohort.
+The head, gradients, reductions, and optimizer states retain FP32 precision.

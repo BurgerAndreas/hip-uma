@@ -52,7 +52,9 @@ def parse_args():
     p.add_argument("--duration", type=float, default=13200)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=0.0)
-    p.add_argument("--loss", choices=("mse", "mae", "block-rmse", "mass-block-rmse"), default="mse")
+    p.add_argument(
+        "--loss", choices=("mse", "mae", "block-rmse", "mass-block-rmse"), default="mse"
+    )
     p.add_argument("--profile-steps", type=int, default=0)
     p.add_argument("--profile-after", type=int, default=100)
     p.add_argument("--workers", type=int, default=2)
@@ -128,7 +130,10 @@ def parse_args():
     args = p.parse_args()
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         p.error("--weight-decay must be finite and nonnegative")
-    if not math.isfinite(args.packed_window_memory_gb) or args.packed_window_memory_gb < 0:
+    if (
+        not math.isfinite(args.packed_window_memory_gb)
+        or args.packed_window_memory_gb < 0
+    ):
         p.error("Packed window memory must be finite and nonnegative")
     if args.threaded_prefetch and not args.device_prefetch:
         p.error("Threaded prefetch requires device prefetch")
@@ -503,7 +508,9 @@ def main():
         )
 
         prefetcher = (
-            ThreadedDeviceBatchPrefetcher if args.threaded_prefetch else DeviceBatchPrefetcher
+            ThreadedDeviceBatchPrefetcher
+            if args.threaded_prefetch
+            else DeviceBatchPrefetcher
         )
         return prefetcher(source, move, device)
 

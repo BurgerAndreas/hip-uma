@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.fixture
+@pytest.fixture()
 def prefetcher(monkeypatch):
     class Stream:
         def wait_event(self, event):

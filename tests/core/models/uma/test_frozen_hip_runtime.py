@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture
+@pytest.fixture()
 def runtime(tmp_path, monkeypatch):
     source = Path(__file__).resolve().parents[4] / "tools/stage_frozen_hip_runtime.py"
     spec = importlib.util.spec_from_file_location("runtime_stage", source)
