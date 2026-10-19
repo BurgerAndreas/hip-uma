@@ -316,3 +316,36 @@ def test_single_pass_cached_packing_preserves_every_tensor(include_targets, scal
             torch.testing.assert_close(a, b, rtol=0, atol=0)
         else:
             assert a == b
+
+
+@pytest.mark.parametrize("budget", [0, 32, 256, 1024, 8192])
+def test_window_staging_respects_byte_budget_and_preserves_payloads(budget):
+    from fairchem.core.frozen_hip.packed import stage_packed_arrays
+
+    values = dict(
+        features=np.arange(128, dtype=np.float32),
+        pair_targets=np.arange(64, dtype=np.float32),
+        diagonal_targets=np.arange(32, dtype=np.float32),
+        coords=np.arange(12, dtype=np.float32),
+        atomic_numbers=np.arange(4, dtype=np.int64),
+    )
+    staged, used = stage_packed_arrays(values, budget)
+    assert used <= budget
+    actual = 0
+    for key, value in values.items():
+        np.testing.assert_array_equal(staged[key], value)
+        if staged[key] is not value:
+            assert not np.shares_memory(staged[key], value)
+            actual += value.nbytes
+    assert actual == used
+
+
+def test_window_staging_skips_targets_when_preparing_features():
+    from fairchem.core.frozen_hip.packed import stage_packed_arrays
+
+    labels = np.ones(128, dtype=np.float32)
+    staged, used = stage_packed_arrays(
+        dict(pair_targets=labels), 4096, include_targets=False
+    )
+    assert used == 0
+    assert staged["pair_targets"] is labels

@@ -402,6 +402,21 @@ def block_mae(edge_blocks, node_blocks, data):
     return block_rmse(edge_blocks, node_blocks, data, absolute=True)
 
 
+def stage_packed_arrays(values, budget, *, include_targets=True):
+    """Copy contiguous payloads within a strict byte budget before random gathers."""
+    staged, used = dict(values), 0
+    keys = ["features"]
+    if include_targets:
+        keys.extend(("pair_targets", "diagonal_targets"))
+    keys.extend(("coords", "atomic_numbers"))
+    for key in keys:
+        array = values.get(key)
+        if array is not None and array.nbytes <= budget - used:
+            staged[key] = np.array(array, copy=True, order="C")
+            used += array.nbytes
+    return staged, used
+
+
 class PackedHessianStream(IterableDataset):
     """
     Stream memory-mapped training bundles with bounded quadratic GPU batches.
@@ -431,6 +446,7 @@ class PackedHessianStream(IterableDataset):
         include_targets=True,
         include_cache_metadata=True,
         fast_packing=False,
+        window_memory_bytes=0,
     ):
         super().__init__()
         self.root, self.markers = Path(root), markers
@@ -444,6 +460,9 @@ class PackedHessianStream(IterableDataset):
         self.include_targets = include_targets
         self.include_cache_metadata = include_cache_metadata
         self.fast_packing = fast_packing
+        if window_memory_bytes < 0:
+            raise ValueError("Window memory budget must be nonnegative")
+        self.window_memory_bytes = window_memory_bytes
         if window_files < 1:
             raise ValueError("Packed window size must be positive")
         self.window_files, self.max_passes = window_files, max_passes
@@ -466,6 +485,7 @@ class PackedHessianStream(IterableDataset):
                 raise ValueError("Too few packed bundles for all loader workers")
             for start in range(0, len(mine), self.window_files):
                 window = []
+                staged_bytes = 0
                 for source in mine[start : start + self.window_files]:
                     path = self.root / self.markers[source]
                     values, header = open_packed(path)
@@ -530,6 +550,13 @@ class PackedHessianStream(IterableDataset):
                                 ).tolist(),
                                 hip_data_sha256=source_sha,
                             )
+                    if self.window_memory_bytes:
+                        values, used = stage_packed_arrays(
+                            values,
+                            self.window_memory_bytes - staged_bytes,
+                            include_targets=self.include_targets,
+                        )
+                        staged_bytes += used
                     window.append((values, header))
                 references, sizes, cached = [], [], []
                 for source, (values, _) in enumerate(window):

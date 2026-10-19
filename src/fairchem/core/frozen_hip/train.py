@@ -60,6 +60,7 @@ def parse_args():
     p.add_argument("--device-prefetch", action="store_true")
     p.add_argument("--threaded-prefetch", action="store_true")
     p.add_argument("--fast-packed-loader", action="store_true")
+    p.add_argument("--packed-window-memory-gb", type=float, default=0.0)
     p.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
         "--pair-budget",
@@ -119,6 +120,7 @@ def parse_args():
     p.add_argument("--fused-scatter", action="store_true")
     p.add_argument("--fused-wigner", action="store_true")
     p.add_argument("--fused-radial", action="store_true")
+    p.add_argument("--radial-tile", type=int, choices=(64, 128, 256), default=64)
     p.add_argument("--segmented-scatter", action="store_true")
     p.add_argument("--async-grad-check", action="store_true")
     p.add_argument("--stop-file", type=Path)
@@ -126,6 +128,8 @@ def parse_args():
     args = p.parse_args()
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         p.error("--weight-decay must be finite and nonnegative")
+    if not math.isfinite(args.packed_window_memory_gb) or args.packed_window_memory_gb < 0:
+        p.error("Packed window memory must be finite and nonnegative")
     if args.threaded_prefetch and not args.device_prefetch:
         p.error("Threaded prefetch requires device prefetch")
     if args.prefetch_factor < 1:
@@ -261,8 +265,12 @@ def main():
 
         enable_scaled_linear(model.head)
     if args.fused_radial:
-        from fairchem.core.frozen_hip.radial import enable_fused_radial
+        from fairchem.core.frozen_hip.radial import (
+            configure_radial_tile,
+            enable_fused_radial,
+        )
 
+        configure_radial_tile(args.radial_tile)
         enable_fused_radial(model.head)
     head = model.head
     configure_head_precision(head, args.head_precision)
@@ -374,6 +382,7 @@ def main():
                 feature_cache=cache_root,
                 include_cache_metadata=not args.feature_cache_read_only,
                 fast_packing=args.fast_packed_loader,
+                window_memory_bytes=int(args.packed_window_memory_gb * 1024**3),
             )
         else:
             stream = HessianStream(

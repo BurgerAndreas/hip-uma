@@ -16,6 +16,15 @@ from torch.library import triton_op, wrap_triton
 
 from fairchem.core.frozen_hip.scatter import _m_order
 
+_KERNEL_CONFIG = {"channel_tile": 64}
+
+
+def configure_radial_tile(tile):
+    """Select an FP32 channel tile without changing tensor layouts or weights."""
+    if tile not in (64, 128, 256):
+        raise ValueError("Radial channel tile must be 64, 128, or 256")
+    _KERNEL_CONFIG["channel_tile"] = tile
+
 
 @triton.jit
 def _radial_row(m):
@@ -123,8 +132,9 @@ def radial_gather(
 ) -> torch.Tensor:
     e, c = edges.shape[1], x.shape[-1]
     out = x.new_empty((e, 9, 2 * c))
-    wrap_triton(_forward)[(min(max(e, 1), 8192), triton.cdiv(2 * c, 64))](
-        x, w, edges, radial, out, e, c, 64, 8192, num_warps=2
+    tile = _KERNEL_CONFIG["channel_tile"]
+    wrap_triton(_forward)[(min(max(e, 1), 8192), triton.cdiv(2 * c, tile))](
+        x, w, edges, radial, out, e, c, tile, 8192, num_warps=tile // 32
     )
     return out
 
@@ -141,13 +151,14 @@ def radial_gather_grad(
     e, c = edges.shape[1], x.shape[-1]
     dr = torch.empty_like(radial)
     dx = torch.zeros_like(x) if need_x else x.new_empty(0)
-    grid = (min(max(e, 1), 8192), triton.cdiv(2 * c, 64))
+    tile = _KERNEL_CONFIG["channel_tile"]
+    grid = (min(max(e, 1), 8192), triton.cdiv(2 * c, tile))
     wrap_triton(_backward_radial)[grid](
-        x, w, edges, gradient, dr, e, c, 64, 8192, num_warps=2
+        x, w, edges, gradient, dr, e, c, tile, 8192, num_warps=tile // 32
     )
     if need_x:
         wrap_triton(_backward_node)[grid](
-            w, edges, radial, gradient, dx, e, c, 64, 8192, num_warps=2
+            w, edges, radial, gradient, dx, e, c, tile, 8192, num_warps=tile // 32
         )
     return dx, dr
 

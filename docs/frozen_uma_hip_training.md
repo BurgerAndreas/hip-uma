@@ -753,3 +753,16 @@ of constructing and concatenating intermediate AtomicData objects. Cache-writer
 metadata and uncached inputs retain the original packing path. The allocation
 runner exposes `THREADED_PREFETCH=1` and `FAST_PACKED_LOADER=1`. Enable these
 switches only after matched throughput and correctness checks on the workload.
+
+`--packed-window-memory-gb` optionally stages cached feature and target arrays
+with sequential reads before random per-batch gathers. Its default is zero.
+The byte budget applies separately to each loader worker and its current shard
+window. Arrays that exceed the remaining budget stay memory mapped. This keeps
+all samples and dtypes intact while bounding extra private host memory. Set
+`PACKED_WINDOW_MEMORY_GB` in the allocation runner to request this option.
+
+The fused FP32 radial kernels accept `--radial-tile` (`64`, `128`, or `256`)
+without changing weights or tensor layouts. The default remains `64`.
+`RADIAL_TILE` exposes the same choice through the allocation runner. Select
+larger tiles only after forward and gradient checks and a complete training
+benchmark; isolated kernel gains do not establish a training speed gain.

@@ -103,8 +103,14 @@ def test_fused_rotation_scatter_preserves_values_and_gradients(offset, segmented
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("channels", [4, 128])
 @pytest.mark.parametrize("count", [0, 701])
-def test_fused_radial_gather_matches_values_and_both_gradients(channels, count):
+@pytest.mark.parametrize("tile", [64, 256])
+def test_fused_radial_gather_matches_values_and_both_gradients(
+    channels, count, tile, monkeypatch
+):
+    from fairchem.core.frozen_hip import radial as radial_module
     from fairchem.core.frozen_hip.radial import fused_radial_gather
+
+    monkeypatch.setitem(radial_module._KERNEL_CONFIG, "channel_tile", tile)
     from fairchem.core.models.uma.nn.execution_backends import UMASFastGPUBackend
 
     torch.manual_seed(71)
