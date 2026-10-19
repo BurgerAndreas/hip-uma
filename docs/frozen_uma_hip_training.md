@@ -766,3 +766,13 @@ without changing weights or tensor layouts. The default remains `64`.
 `RADIAL_TILE` exposes the same choice through the allocation runner. Select
 larger tiles only after forward and gradient checks and a complete training
 benchmark; isolated kernel gains do not establish a training speed gain.
+
+Keep the Python environment, base interpreter, generated kernels, bytecode,
+and compiler caches on local storage. A free local filesystem can remain
+available even when another local scratch filesystem is full. Shared-filesystem
+fallbacks can stall imports and lazy CUDA module loading while the GPU sits idle.
+`tools/stage_frozen_hip_runtime.py` stages an environment archive and relocates
+its base interpreter under a caller-supplied directory. It locks publication,
+checks archive identity, and verifies the relocated virtual environment before
+marking it ready. Configure CUDA, Triton, and compiler cache directories beside
+the staged runtime. Keep experiment checkpoints on persistent storage.
