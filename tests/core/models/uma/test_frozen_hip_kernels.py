@@ -239,7 +239,7 @@ def test_fused_block_norm_is_stable_at_zero_and_extreme_scales(value, mass_weigh
     loss.backward()
     from ase.data import atomic_masses
 
-    factor = 1 / atomic_masses[6] if mass_weighted else 1
+    factor = 1 / float(atomic_masses[6]) if mass_weighted else 1
     torch.testing.assert_close(
         loss, torch.tensor(2 * value * factor, device="cuda"), rtol=2e-5, atol=0
     )
