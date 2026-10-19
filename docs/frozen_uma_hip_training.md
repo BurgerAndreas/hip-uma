@@ -835,3 +835,24 @@ thread or GPU matrix work. A short warm GPU trace attributed about 44% of kernel
 time to matrix products. Treat reduced-precision matrix kernels as an accuracy
 experiment, and test complete-step speed before selecting them. Existing BF16
 MLP and scaled FP16 variants did not consistently improve full training speed.
+
+
+`--head-precision fp16-edge` uses FP16 hidden activations and tensor-core operands
+inside the edge networks. It requires fused rotations, fused radial operations,
+block SO2, projected readout, and segmented scatter. Use `HEAD_PRECISION=fp16-edge`
+and `LOSS_SCALE=1024` through the allocation runner. The default remains FP32.
+
+Radial gathering and inverse-rotation gradients write FP16 directly, avoiding
+separate full-size casts. Linear bias addition uses the vendor GEMM epilogue.
+Normalization statistics, node accumulation, the final thin projection,
+Cartesian outputs, Coulomb terms, and losses retain FP32. Parameters, parameter
+gradients, and AdamW state also retain FP32. Long weight-gradient reductions
+use native FP32 GEMM outputs. Frozen inference retains its original reduction
+policy when the head selects stricter FP16 accumulation settings.
+
+The trainer scales the scalar loss before backward and divides all parameter
+gradients before clipping and AdamW. The scale defaults to 1 for other modes
+and 1024 for FP16 edge mode. The checkpoint and run configuration record it.
+The existing nonfinite gradient guard rejects unsafe updates. This mode changes
+rounding, so compare predictions and projected metrics before selecting it.
+Sampler settings, target normalization, and the loss definition stay unchanged.

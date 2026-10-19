@@ -53,6 +53,9 @@ class FrozenHIP(nn.Module):
         )
         original = getattr(predictor.model, "module", predictor.model)
         self.backbone = original.backbone.to(device).eval().requires_grad_(False)
+        self.backbone_fp16_reduced_precision_reduction = (
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+        )
         if backbone_graph_version is not None:
             self.backbone.radius_pbc_version = backbone_graph_version
         self.backbone.regress_config.forces = False
@@ -77,10 +80,18 @@ class FrozenHIP(nn.Module):
         """
         if precision not in ("fp32", "fp16"):
             raise ValueError("Frozen backbone precision must be fp32 or fp16")
-        with torch.no_grad(), torch.autocast(
-            "cuda", dtype=torch.float16, enabled=precision == "fp16"
-        ):
-            emb = self.backbone(data)
+        previous = torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+        try:
+            # A head precision setting must not change frozen feature inference.
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
+                self.backbone_fp16_reduced_precision_reduction
+            )
+            with torch.no_grad(), torch.autocast(
+                "cuda", dtype=torch.float16, enabled=precision == "fp16"
+            ):
+                emb = self.backbone(data)
+        finally:
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = previous
         emb["node_embedding"] = emb["node_embedding"].float()
         return emb
 

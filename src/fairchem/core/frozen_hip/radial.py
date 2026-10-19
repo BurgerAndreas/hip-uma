@@ -200,6 +200,10 @@ def fused_radial_gather(x, edges, w, radial):
 
 def radial_convolution(convolution, x, edges, w, edge_features):
     """Keep the original trainable convolution after fused radial gathering."""
+    if getattr(convolution, "edge_mixed_precision", False):
+        from fairchem.core.frozen_hip.edge_precision import radial_convolution as mixed
+
+        return mixed(convolution, x, edges, w, edge_features)
     radial = convolution.rad_func(edge_features)
     messages = fused_radial_gather(x, edges, w, radial)
     parts = messages.split(convolution.m_split_sizes, dim=1)

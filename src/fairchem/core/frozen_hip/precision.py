@@ -4,7 +4,7 @@ Copyright (c) Meta Platforms, Inc. and affiliates.
 This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 
-Restrict reduced precision to the HIP head's scalar multilayer perceptrons.
+Select reduced precision regions while retaining FP32 trainable parameters.
 """
 
 from __future__ import annotations
@@ -30,12 +30,13 @@ class MixedPrecisionMLP(nn.Sequential):
 
 def configure_head_precision(head, mode):
     """
-    Preserve state names while selecting scalar MLPs for optional BF16 execution.
+    Preserve state names while selecting BF16 MLPs or FP16 edge hidden layers.
 
-    Rotations, tensor products, equivariant projections, and reductions stay
-    outside this autocast region. Parameters and optimizer states remain FP32.
+    BF16 MLP mode uses autocast only for scalar networks. FP16 edge mode uses
+    explicit kernels and retains FP32 normalization and final projection.
+    Parameters, parameter gradients, and optimizer states remain FP32.
     """
-    if mode not in ("fp32", "bf16", "bf16-mlp"):
+    if mode not in ("fp32", "bf16", "bf16-mlp", "fp16-edge"):
         raise ValueError(f"Unknown HIP precision mode: {mode}")
     count = 0
     for name, original in list(head.named_modules()):
@@ -51,4 +52,8 @@ def configure_head_precision(head, mode):
             setattr(parent, child_name, module)
         module.enabled = mode == "bf16-mlp"
         count += 1
+    if mode == "fp16-edge" or getattr(head, "edge_mixed_precision", False):
+        from fairchem.core.frozen_hip.edge_precision import enable_edge_precision
+
+        enable_edge_precision(head, enabled=mode == "fp16-edge")
     return count

@@ -17,6 +17,10 @@ def project_convolution(convolution, projection, messages):
     """
     Preserve both trainable factors while eliminating their wide intermediate.
     """
+    if getattr(convolution, "edge_mixed_precision", False):
+        from fairchem.core.frozen_hip.edge_precision import project_convolution as mixed
+
+        return mixed(convolution, projection, messages)
     channels = convolution.m_output_channels
     degrees = convolution.lmax + 1
     p = projection.weight[:, 0, :]

@@ -97,8 +97,11 @@ def parse_args():
     p.add_argument("--code-revision")
     p.add_argument("--execution-mode", choices=("general",), default="general")
     p.add_argument(
-        "--head-precision", choices=("fp32", "bf16", "bf16-mlp"), default="fp32"
+        "--head-precision",
+        choices=("fp32", "bf16", "bf16-mlp", "fp16-edge"),
+        default="fp32",
     )
+    p.add_argument("--loss-scale", type=float)
     p.add_argument(
         "--checkpoint-edges",
         type=int,
@@ -136,6 +139,25 @@ def parse_args():
         or args.packed_window_memory_gb < 0
     ):
         p.error("Packed window memory must be finite and nonnegative")
+    if args.loss_scale is None:
+        args.loss_scale = 1024.0 if args.head_precision == "fp16-edge" else 1.0
+    if not math.isfinite(args.loss_scale) or args.loss_scale <= 0:
+        p.error("Loss scale must be finite and positive")
+    if args.head_precision == "fp16-edge" and not all(
+        (
+            args.fused_rotations,
+            args.fused_radial,
+            args.block_so2,
+            args.projected_readout,
+            args.segmented_scatter,
+        )
+    ):
+        p.error(
+            "FP16 edge mode requires fused rotations, radial operations, block SO2, "
+            "projected readout, and segmented scatter"
+        )
+    if args.head_precision == "fp16-edge" and args.scaled_linear:
+        p.error("FP16 edge mode cannot use adaptive scaled linear operations")
     if args.threaded_prefetch and not args.device_prefetch:
         p.error("Threaded prefetch requires device prefetch")
     if args.prefetch_factor < 1:
@@ -149,10 +171,10 @@ def parse_args():
     if args.fused_scatter and not args.fused_rotations:
         p.error("Fused scatter requires fused rotations")
     if args.fused_radial and (
-        not args.fused_rotations or args.head_precision != "fp32"
+        not args.fused_rotations or args.head_precision not in ("fp32", "fp16-edge")
     ):
         p.error(
-            "Fused radial operations require fused rotations and FP32 head precision"
+            "Fused radial operations require fused rotations and FP32 or FP16 edge precision"
         )
     if args.checkpoint_edges is None:
         args.checkpoint_edges = args.microbatch_pairs + 1
@@ -174,6 +196,7 @@ def main():
         for key, default in (
             ("loss_name", "mse"),
             ("head_precision", "fp32"),
+            ("loss_scale", 1.0),
             ("backbone_precision", "fp32"),
             ("backbone_graph_version", 2),
             ("tf32", False),
@@ -575,6 +598,7 @@ def main():
             "head_layers": args.layers,
             "dataset_revision": "7ce83e7425649619c9f85dad485bb2cfd7ee12bd",
             "head_precision": args.head_precision,
+            "loss_scale": args.loss_scale,
             "tf32": args.tf32,
             "backbone_precision": args.backbone_precision,
             "backbone_graph_version": args.backbone_graph_version,
@@ -816,7 +840,7 @@ def main():
                                 ),
                             )
                     with phase("head_backward"):
-                        (loss * (b * world / count)).backward()
+                        (loss * (b * world * args.loss_scale / count)).backward()
                 with phase("batch_metrics"):
                     metrics[0].add_(loss.detach(), alpha=b)
                     host_metrics[0] += b
@@ -825,6 +849,11 @@ def main():
                     host_metrics[3] += 1
                 host_batches[micro_index] = None
                 del prediction, loss, data, host_data
+            if args.loss_scale != 1.0:
+                torch._foreach_div_(
+                    [p.grad for p in head.parameters() if p.grad is not None],
+                    args.loss_scale,
+                )
             with phase("grad_clip"):
                 norm = torch.nn.utils.clip_grad_norm_(
                     head.parameters(),
@@ -942,7 +971,6 @@ def main():
         state = load_last_head(head, args.output / "latest.pt", frozen_hash, device)
         step = state["step"]
         torch.backends.cuda.matmul.allow_tf32 = state.get("tf32", False)
-        configure_head_precision(head, state.get("head_precision", "fp32"))
         args.head_precision = state.get("head_precision", "fp32")
         args.backbone_precision = state.get("backbone_precision", "fp32")
         args.backbone_graph_version = state.get("backbone_graph_version", 2)
@@ -975,6 +1003,7 @@ def main():
         from fairchem.core.frozen_hip.radial import enable_fused_radial
 
         enable_fused_radial(head, enabled=state.get("fused_radial", False))
+        configure_head_precision(head, args.head_precision)
         evaluate(final=True)
     if rank == 0:
         assert parameter_hash(model.backbone) == frozen_hash

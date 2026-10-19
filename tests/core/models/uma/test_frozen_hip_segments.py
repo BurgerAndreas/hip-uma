@@ -167,6 +167,17 @@ def test_zero_weight_decay_reaches_trainer_and_successor(allocation):
     assert submission["segment"] == "1"
 
 
+def test_edge_precision_and_loss_scale_reach_the_trainer(allocation):
+    run, env = allocation
+    result = invoke({**env, "HEAD_PRECISION": "fp16-edge", "LOSS_SCALE": "1024"})
+    assert result.returncode == 0, result.stderr
+    args = json.loads((run / "arguments.json").read_text())
+    assert args[args.index("--head-precision") + 1] == "fp16-edge"
+    assert args[args.index("--loss-scale") + 1] == "1024"
+    submission = read_lines(run / "submissions.jsonl")[0]
+    assert "--export=ALL" in submission["args"]
+
+
 def test_completion_cancels_successor_and_future_allocations_skip_training(allocation):
     run, env = allocation
     result = invoke({**env, "OUTPUT_STEP": "2000000"})

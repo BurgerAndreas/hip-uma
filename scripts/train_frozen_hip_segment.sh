@@ -101,7 +101,7 @@ args=(
     --weight-decay "${WEIGHT_DECAY:-0}"
     --max-batch 64 --max-atoms 2560 --microbatch-pairs "${MICROBATCH_PAIRS:-524288}"
     --workers "${LOADER_WORKERS:-2}" --prefetch-factor "${PREFETCH_FACTOR:-8}" --window-shards 8
-    --tf32 --backbone-precision fp16 --head-precision fp32
+    --tf32 --backbone-precision fp16 --head-precision "${HEAD_PRECISION:-fp32}"
     --backbone-graph-version 4 --grouped-mole --fused-backbone
     --fused-rotations --block-so2 --projected-readout --compile-head
     --checkpoint-every "${CHECKPOINT_EVERY:-5000}" --validate-every "${VALIDATE_EVERY:-400000}" --log-every 100
@@ -119,6 +119,7 @@ if [[ "${ASYNC_GRAD_CHECK:-0}" == 1 ]]; then args+=(--async-grad-check); fi
 if [[ "${DEVICE_PREFETCH:-0}" == 1 ]]; then args+=(--device-prefetch); fi
 if [[ "${THREADED_PREFETCH:-0}" == 1 ]]; then args+=(--threaded-prefetch); fi
 if [[ "${FAST_PACKED_LOADER:-0}" == 1 ]]; then args+=(--fast-packed-loader); fi
+if [[ -n "${LOSS_SCALE:-}" ]]; then args+=(--loss-scale "$LOSS_SCALE"); fi
 if [[ "${PACKED_WINDOW_PREFETCH:-0}" == 1 ]]; then args+=(--packed-window-prefetch); fi
 if [[ -n "${PACKED_WINDOW_MEMORY_GB:-}" ]]; then
     args+=(--packed-window-memory-gb "$PACKED_WINDOW_MEMORY_GB")
