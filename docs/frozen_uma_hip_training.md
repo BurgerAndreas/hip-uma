@@ -721,8 +721,13 @@ The existing Cartesian metrics remain available under their original names.
 Validation still runs every 100,000 updates on the same 10,027 geometries.
 Final evaluation still reloads `latest.pt`.
 
-Weight decay is configurable with `--weight-decay` (default `1e-4`). The
+Weight decay is configurable with `--weight-decay` (default `0`). The
 allocation runner accepts `WEIGHT_DECAY=0` for a zero-decay ablation and passes
 it to each successor. Use a separate output directory and the original seed
 for a fresh comparison. Resume rejects optimizer states with different decay.
 The run configuration and checkpoints record the selected decay.
+
+New runs default to zero weight decay and validation every 400,000 updates.
+The allocation runner accepts `VALIDATE_EVERY` to set the validation interval.
+A four-million-step experiment sets `TARGET_STEPS=4000000`; the cosine
+schedule spans that full target. Final evaluation still uses the last checkpoint.

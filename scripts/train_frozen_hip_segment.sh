@@ -96,13 +96,13 @@ export PYTHONPATH="$CODE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 args=(
     --data "$DATA_ROOT" --packed-data "$PACKED_ROOT" --output "$RUN_ROOT"
     --loss "$LOSS_NAME" --steps "$TARGET_STEPS" --duration "$SEGMENT_SECONDS"
-    --weight-decay "${WEIGHT_DECAY:-0.0001}"
+    --weight-decay "${WEIGHT_DECAY:-0}"
     --max-batch 64 --max-atoms 2560 --microbatch-pairs "${MICROBATCH_PAIRS:-524288}"
     --workers "${LOADER_WORKERS:-2}" --window-shards 8
     --tf32 --backbone-precision fp16 --head-precision fp32
     --backbone-graph-version 4 --grouped-mole --fused-backbone
     --fused-rotations --block-so2 --projected-readout --compile-head
-    --checkpoint-every "${CHECKPOINT_EVERY:-5000}" --validate-every 100000 --log-every 100
+    --checkpoint-every "${CHECKPOINT_EVERY:-5000}" --validate-every "${VALIDATE_EVERY:-400000}" --log-every 100
     --refresh-data-every 0
     --stop-file "$RUN_ROOT/STOP"
 )

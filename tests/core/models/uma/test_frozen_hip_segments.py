@@ -133,8 +133,8 @@ def test_successor_is_queued_before_training_and_resumes_exact_target(allocation
     args = json.loads((run / "arguments.json").read_text())
     assert args[args.index("--steps") + 1] == "2000000"
     assert args[args.index("--loss") + 1] == "mae"
-    assert args[args.index("--validate-every") + 1] == "100000"
-    assert args[args.index("--weight-decay") + 1] == "0.0001"
+    assert args[args.index("--validate-every") + 1] == "400000"
+    assert args[args.index("--weight-decay") + 1] == "0"
     assert read_lines(run / "events.jsonl") == ["submit_ok", "train"]
     submission = read_lines(run / "submissions.jsonl")[0]
     assert submission["segment"] == "1"
@@ -145,10 +145,21 @@ def test_successor_is_queued_before_training_and_resumes_exact_target(allocation
 
 def test_zero_weight_decay_reaches_trainer_and_successor(allocation):
     run, env = allocation
-    result = invoke({**env, "WEIGHT_DECAY": "0"})
+    result = invoke(
+        {
+            **env,
+            "WEIGHT_DECAY": "0",
+            "TARGET_STEPS": "4000000",
+            "LOSS_NAME": "block-rmse",
+            "VALIDATE_EVERY": "400000",
+        }
+    )
     assert result.returncode == 0, result.stderr
     args = json.loads((run / "arguments.json").read_text())
     assert args[args.index("--weight-decay") + 1] == "0"
+    assert args[args.index("--steps") + 1] == "4000000"
+    assert args[args.index("--loss") + 1] == "block-rmse"
+    assert args[args.index("--validate-every") + 1] == "400000"
     submission = read_lines(run / "submissions.jsonl")[0]
     assert "--export=ALL" in submission["args"]
     assert submission["segment"] == "1"
