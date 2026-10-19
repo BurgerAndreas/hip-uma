@@ -776,3 +776,10 @@ its base interpreter under a caller-supplied directory. It locks publication,
 checks archive identity, and verifies the relocated virtual environment before
 marking it ready. Configure CUDA, Triton, and compiler cache directories beside
 the staged runtime. Keep experiment checkpoints on persistent storage.
+
+
+Allocation successors use `afterany` so a scheduler timeout does not discard
+accepted continuation work. A handled trainer failure cancels its successor;
+it does not repeatedly retry numerical errors. The `STOP` file still cancels
+continuation explicitly. A scheduler interruption can resume only through the
+trainer's normal checkpoint identity and optimizer checks.

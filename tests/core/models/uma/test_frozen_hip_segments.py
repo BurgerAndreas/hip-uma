@@ -138,7 +138,7 @@ def test_successor_is_queued_before_training_and_resumes_exact_target(allocation
     assert read_lines(run / "events.jsonl") == ["submit_ok", "train"]
     submission = read_lines(run / "submissions.jsonl")[0]
     assert submission["segment"] == "1"
-    assert "--dependency=afterok:1234" in submission["args"]
+    assert "--dependency=afterany:1234" in submission["args"]
     assert "--kill-on-invalid-dep=yes" in submission["args"]
     assert (run / "next_job_id").read_text().strip() == "5555"
 
@@ -200,6 +200,7 @@ def test_training_failure_does_not_submit_another_successor(allocation):
     result = invoke({**env, "FAIL_TRAIN": "7"})
     assert result.returncode == 7
     assert read_lines(run / "events.jsonl") == ["submit_ok", "train"]
+    assert json.loads((run / "cancelled.json").read_text()) == ["5555"]
 
 
 @pytest.mark.parametrize("sig", [signal.SIGUSR1, signal.SIGTERM])

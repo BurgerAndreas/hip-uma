@@ -46,6 +46,8 @@ fi
 
 # Queue one successor while the scheduler can still serve this allocation.
 # A later controller outage cannot discard an already accepted dependency.
+# Scheduler timeouts can still resume the last checkpoint. Handled trainer
+# failures cancel their child explicitly instead of repeating a numerical error.
 continuation_job=""
 queue_successor() {
     if [[ -z "${CONTINUATION_SCRIPT:-}" ]]; then return 1; fi
@@ -67,7 +69,7 @@ queue_successor() {
     fi
     local response
     if response=$(SEGMENT_INDEX=$((SEGMENT_INDEX + 1)) timeout 150s sbatch \
-        --parsable --dependency="afterok:$SLURM_JOB_ID" --kill-on-invalid-dep=yes \
+        --parsable --dependency="afterany:$SLURM_JOB_ID" --kill-on-invalid-dep=yes \
         --export=ALL "$CONTINUATION_SCRIPT"); then
         continuation_job="${response%%;*}"
         if [[ ! "$continuation_job" =~ ^[0-9]+$ ]]; then
@@ -140,6 +142,7 @@ if (( status >= 128 )); then
     wait "$trainer_pid" || status=$?
 fi
 if (( status != 0 )); then
+    cancel_successor
     rm -f "$RUN_ROOT/continuation.record"
     exit "$status"
 fi
