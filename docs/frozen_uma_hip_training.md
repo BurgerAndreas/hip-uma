@@ -783,3 +783,9 @@ accepted continuation work. A handled trainer failure cancels its successor;
 it does not repeatedly retry numerical errors. The `STOP` file still cancels
 continuation explicitly. A scheduler interruption can resume only through the
 trainer's normal checkpoint identity and optimizer checks.
+
+
+`PREFETCH_FACTOR` controls the existing per-worker host queue in the allocation
+runner (default `8`). A deeper queue can overlap the next shard window's reads
+with more GPU updates. Keep the worker count fixed when comparing sample order,
+and budget host memory for both staged windows and queued logical batches.

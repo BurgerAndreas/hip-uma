@@ -152,12 +152,14 @@ def test_zero_weight_decay_reaches_trainer_and_successor(allocation):
             "TARGET_STEPS": "4000000",
             "LOSS_NAME": "mass-block-rmse",
             "VALIDATE_EVERY": "400000",
+            "PREFETCH_FACTOR": "32",
         }
     )
     assert result.returncode == 0, result.stderr
     args = json.loads((run / "arguments.json").read_text())
     assert args[args.index("--weight-decay") + 1] == "0"
     assert args[args.index("--steps") + 1] == "4000000"
+    assert args[args.index("--prefetch-factor") + 1] == "32"
     assert args[args.index("--loss") + 1] == "mass-block-rmse"
     assert args[args.index("--validate-every") + 1] == "400000"
     submission = read_lines(run / "submissions.jsonl")[0]
