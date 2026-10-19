@@ -52,7 +52,7 @@ def parse_args():
     p.add_argument("--duration", type=float, default=13200)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=0.0)
-    p.add_argument("--loss", choices=("mse", "mae", "block-rmse"), default="mse")
+    p.add_argument("--loss", choices=("mse", "mae", "block-rmse", "mass-block-rmse"), default="mse")
     p.add_argument("--profile-steps", type=int, default=0)
     p.add_argument("--profile-after", type=int, default=100)
     p.add_argument("--workers", type=int, default=2)
@@ -573,6 +573,8 @@ def main():
                 if args.loss == "mse"
                 else "structure_mean_mae_symmetrized_eV_Angstrom2"
                 if args.loss == "mae"
+                else "structure_mean_mass_block_rmse_symmetrized_eV_Angstrom2_amu"
+                if args.loss == "mass-block-rmse"
                 else "structure_mean_block_rmse_symmetrized_eV_Angstrom2"
             ),
             "training_targets": "symmetrized"
@@ -755,20 +757,34 @@ def main():
                                 "mse": block_mse,
                                 "mae": block_mae,
                                 "block-rmse": block_rmse,
+                                "mass-block-rmse": block_rmse,
                             }[args.loss]
                             loss = loss_function(
                                 prediction["edge_blocks"],
                                 prediction["node_blocks"],
                                 data,
+                                **(
+                                    {"mass_weighted": True}
+                                    if args.loss == "mass-block-rmse"
+                                    else {}
+                                ),
                             )
                         else:
                             loss_function = {
                                 "mse": structure_mse,
                                 "mae": structure_mae,
                                 "block-rmse": structure_block_rmse,
+                                "mass-block-rmse": structure_block_rmse,
                             }[args.loss]
                             loss = loss_function(
-                                prediction, data.hessian, data.hip_sizes
+                                prediction,
+                                data.hessian,
+                                data.hip_sizes,
+                                **(
+                                    {"numbers": data.atomic_numbers}
+                                    if args.loss == "mass-block-rmse"
+                                    else {}
+                                ),
                             )
                     with phase("head_backward"):
                         (loss * (b * world / count)).backward()

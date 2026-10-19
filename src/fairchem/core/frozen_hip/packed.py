@@ -274,7 +274,7 @@ def block_mse(edge_blocks, node_blocks, data):
     return torch.stack(pair_sums).mean()
 
 
-def block_rmse(edge_blocks, node_blocks, data, *, absolute=False):
+def block_rmse(edge_blocks, node_blocks, data, *, absolute=False, mass_weighted=False):
     """
     Average symmetrized-target block norms with equal geometry weights.
     """
@@ -282,8 +282,8 @@ def block_rmse(edge_blocks, node_blocks, data, *, absolute=False):
         from fairchem.core.frozen_hip.kernels import fused_block_mae, fused_block_rmse
 
         operation = fused_block_mae if absolute else fused_block_rmse
-        return operation(edge_blocks, node_blocks, data)
-    from fairchem.core.frozen_hip.losses import block_rmse_values
+        return operation(edge_blocks, node_blocks, data, mass_weighted=mass_weighted)
+    from fairchem.core.frozen_hip.losses import block_rmse_values, inverse_sqrt_masses
 
     def block_values(error):
         return (
@@ -292,6 +292,7 @@ def block_rmse(edge_blocks, node_blocks, data, *, absolute=False):
             else block_rmse_values(error)
         )
 
+    inverse = inverse_sqrt_masses(data.atomic_numbers) if mass_weighted else None
     losses, offset, atom_offset, target_offset = [], 0, 0, 0
     lookup = torch.tensor([[0, 1, 2], [1, 3, 4], [2, 4, 5]], device=node_blocks.device)
     for n in data.hip_sizes:
@@ -310,13 +311,13 @@ def block_rmse(edge_blocks, node_blocks, data, *, absolute=False):
             atom_offset * 6 : (atom_offset + n) * 6
         ].reshape(n, 6)[:, lookup]
         diagonal = nodes + nodes.transpose(-1, -2)
-        losses.append(
-            (
-                2 * block_values(predicted - target).sum()
-                + block_values(diagonal - target_diag).sum()
-            )
-            / (n * n)
-        )
+        pair_values = block_values(predicted - target)
+        diagonal_values = block_values(diagonal - target_diag)
+        if inverse is not None:
+            mass = inverse[atom_offset : atom_offset + n]
+            pair_values = pair_values * mass[i] * mass[j]
+            diagonal_values = diagonal_values * mass.square()
+        losses.append((2 * pair_values.sum() + diagonal_values.sum()) / (n * n))
         offset += n * (n - 1)
         atom_offset += n
         target_offset += width

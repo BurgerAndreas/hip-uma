@@ -731,3 +731,16 @@ New runs default to zero weight decay and validation every 400,000 updates.
 The allocation runner accepts `VALIDATE_EVERY` to set the validation interval.
 A four-million-step experiment sets `TARGET_STEPS=4000000`; the cosine
 schedule spans that full target. Final evaluation still uses the last checkpoint.
+
+Mass-weighted Block RMSE uses `--loss mass-block-rmse` or
+`LOSS_NAME=mass-block-rmse`. Each atom-pair norm receives a factor
+`1 / sqrt(m_i * m_j)`, with ASE masses in amu. Diagonal blocks receive
+`1 / m_i`. Geometries retain equal weights and off-diagonal blocks retain
+weight two. Targets remain symmetrized complete Cartesian Hessians, including
+Coulomb terms. This loss does not apply Eckart projection. Validation retains
+the same raw and mass-weighted, Eckart-projected metrics.
+
+The fused FP32 loss applies mass factors directly to block weights in both
+forward and backward kernels. It retains packed targets and avoids dense
+mass-weighted Hessian allocation. No epsilon or geometry-dependent
+renormalization changes the objective. The loss unit is eV/(Angstrom^2*amu).

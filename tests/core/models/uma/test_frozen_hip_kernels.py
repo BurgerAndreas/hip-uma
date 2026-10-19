@@ -188,7 +188,8 @@ def test_async_feature_cache_owns_cuda_transfer_until_atomic_publication(tmp_pat
 
 
 @pytest.mark.parametrize("sizes", [[1], [1, 4, 1, 9, 2, 1]])
-def test_fused_block_norm_matches_reference_values_and_gradients(sizes):
+@pytest.mark.parametrize("mass_weighted", [False, True])
+def test_fused_block_norm_matches_reference_values_and_gradients(sizes, mass_weighted):
     from fairchem.core.frozen_hip.packed import block_rmse
 
     data = metadata(sizes)
@@ -206,10 +207,13 @@ def test_fused_block_norm_matches_reference_values_and_gradients(sizes):
         sum(n * (n - 1) for n in sizes), 3, 3, device="cuda", requires_grad=True
     )
     node = torch.randn(sum(sizes), 3, 3, device="cuda", requires_grad=True)
-    expected = block_rmse(edge, node, data)
+    data.atomic_numbers = torch.tensor([1, 6, 8, 17, 35, 7, 16], device="cuda").repeat(
+        sum(sizes)
+    )[: sum(sizes)]
+    expected = block_rmse(edge, node, data, mass_weighted=mass_weighted)
     expected_gradients = torch.autograd.grad(expected, (edge, node), allow_unused=True)
     data.hip_fused_loss = True
-    actual = block_rmse(edge, node, data)
+    actual = block_rmse(edge, node, data, mass_weighted=mass_weighted)
     gradients = torch.autograd.grad(actual, (edge, node))
     torch.testing.assert_close(actual, expected)
     for got, wanted in zip(gradients, expected_gradients, strict=True):
@@ -220,7 +224,8 @@ def test_fused_block_norm_matches_reference_values_and_gradients(sizes):
 
 
 @pytest.mark.parametrize("value", [0.0, 1e-30, 1e-7, 1e20])
-def test_fused_block_norm_is_stable_at_zero_and_extreme_scales(value):
+@pytest.mark.parametrize("mass_weighted", [False, True])
+def test_fused_block_norm_is_stable_at_zero_and_extreme_scales(value, mass_weighted):
     from fairchem.core.frozen_hip.packed import block_rmse
 
     data = metadata([1])
@@ -229,13 +234,17 @@ def test_fused_block_norm_is_stable_at_zero_and_extreme_scales(value):
     data.hip_diagonal_targets = torch.zeros(6, device="cuda")
     edge = torch.empty(0, 3, 3, device="cuda", requires_grad=True)
     node = torch.full((1, 3, 3), value, device="cuda", requires_grad=True)
-    loss = block_rmse(edge, node, data)
+    data.atomic_numbers = torch.tensor([6], device="cuda")
+    loss = block_rmse(edge, node, data, mass_weighted=mass_weighted)
     loss.backward()
+    from ase.data import atomic_masses
+
+    factor = 1 / atomic_masses[6] if mass_weighted else 1
     torch.testing.assert_close(
-        loss, torch.tensor(2 * value, device="cuda"), rtol=2e-5, atol=0
+        loss, torch.tensor(2 * value * factor, device="cuda"), rtol=2e-5, atol=0
     )
     torch.testing.assert_close(
-        node.grad, torch.full_like(node, 0 if value == 0 else 2 / 9)
+        node.grad, torch.full_like(node, 0 if value == 0 else 2 * factor / 9)
     )
 
 

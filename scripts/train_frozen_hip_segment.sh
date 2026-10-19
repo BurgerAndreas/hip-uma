@@ -8,13 +8,13 @@ set -euo pipefail
 : "${DATA_ROOT:?Set DATA_ROOT}"
 : "${PACKED_ROOT:?Set PACKED_ROOT}"
 : "${RUN_ROOT:?Set RUN_ROOT}"
-: "${LOSS_NAME:?Set LOSS_NAME to mae or block-rmse}"
+: "${LOSS_NAME:?Set LOSS_NAME to mae, block-rmse, or mass-block-rmse}"
 : "${TARGET_STEPS:=2000000}"
 : "${SEGMENT_SECONDS:=13200}"
 : "${SEGMENT_INDEX:=0}"
 : "${MAX_SEGMENTS:=128}"
 
-case "$LOSS_NAME" in mae|block-rmse) ;; *) exit 2 ;; esac
+case "$LOSS_NAME" in mae|block-rmse|mass-block-rmse) ;; *) exit 2 ;; esac
 if (( SEGMENT_INDEX >= MAX_SEGMENTS )); then
     echo "Maximum allocation count reached; checkpoint remains resumable." >&2
     exit 2

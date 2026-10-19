@@ -209,12 +209,14 @@ def _block_norm_loss(
     PP,
     GRAD,
     PARTIAL,
+    INVERSE_MASS,
     COUNT,
     B,
     NODE: tl.constexpr,
     BLOCK: tl.constexpr,
     LEVELS: tl.constexpr,
     ABSOLUTE: tl.constexpr = False,
+    MASS_WEIGHTED: tl.constexpr = False,
 ):
     index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     k = tl.arange(0, 16)
@@ -247,6 +249,15 @@ def _block_norm_loss(
     error = tl.where(mask, error, 0)
     n = tl.load(AP + sample + 1) - tl.load(AP + sample)
     weight = 1.0 / (B * n * n)
+    if MASS_WEIGHTED:
+        if NODE:
+            inverse = tl.load(INVERSE_MASS + index, index < COUNT, 0)
+            weight *= inverse * inverse
+        else:
+            start = tl.load(AP + sample)
+            first_mass = tl.load(INVERSE_MASS + start + i, index < COUNT, 0)
+            second_mass = tl.load(INVERSE_MASS + start + j, index < COUNT, 0)
+            weight *= first_mass * second_mass
     if ABSOLUTE:
         sign = tl.where(error > 0, 1.0, tl.where(error < 0, -1.0, 0.0))
         grad = sign * (2.0 * weight / 9.0)[:, None]
@@ -263,7 +274,7 @@ def _block_norm_loss(
 
 class _BlockRMSE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, edge, node, targets, diagonal, ap, ep, pp, absolute):
+    def forward(ctx, edge, node, targets, diagonal, ap, ep, pp, absolute, inverse):
         edge, node = edge.contiguous(), node.contiguous()
         ge = torch.empty_like(edge, dtype=torch.float32)
         gn = torch.empty_like(node, dtype=torch.float32)
@@ -284,12 +295,14 @@ class _BlockRMSE(torch.autograd.Function):
                     pp,
                     gradient,
                     partial,
+                    inverse,
                     count,
                     b,
                     is_node,
                     64,
                     (b + 1).bit_length(),
                     absolute,
+                    inverse is not None,
                     num_warps=4,
                 )
             partials.append(partial.sum())
@@ -309,13 +322,17 @@ class _BlockRMSE(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
-def fused_block_rmse(edge, node, data):
+def fused_block_rmse(edge, node, data, *, mass_weighted=False):
     """
     Compute block norms and first derivatives without dense Hessian assembly.
     """
+    from fairchem.core.frozen_hip.losses import inverse_sqrt_masses
+
+    inverse = inverse_sqrt_masses(data.atomic_numbers) if mass_weighted else None
     return _BlockRMSE.apply(
         edge,
         node,
@@ -325,11 +342,15 @@ def fused_block_rmse(edge, node, data):
         data.hip_edge_ptr,
         data.hip_pair_ptr,
         False,
+        inverse,
     )
 
 
-def fused_block_mae(edge, node, data):
+def fused_block_mae(edge, node, data, *, mass_weighted=False):
     """Compute geometry-averaged MAE without a dense Hessian intermediate."""
+    from fairchem.core.frozen_hip.losses import inverse_sqrt_masses
+
+    inverse = inverse_sqrt_masses(data.atomic_numbers) if mass_weighted else None
     return _BlockRMSE.apply(
         edge,
         node,
@@ -339,4 +360,5 @@ def fused_block_mae(edge, node, data):
         data.hip_edge_ptr,
         data.hip_pair_ptr,
         True,
+        inverse,
     )

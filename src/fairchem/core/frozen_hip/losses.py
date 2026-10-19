@@ -9,7 +9,20 @@ Evaluate rotation-invariant Cartesian block norms without numerical smoothing.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
+from ase.data import atomic_masses
+
+
+@lru_cache(maxsize=16)
+def _inverse_mass_table(device):
+    return torch.as_tensor(atomic_masses, dtype=torch.float32, device=device).rsqrt()
+
+
+def inverse_sqrt_masses(numbers):
+    """Return inverse square root atomic masses in amu on the input device."""
+    return _inverse_mass_table(numbers.device)[numbers.long()]
 
 
 def block_rmse_values(error):
@@ -27,11 +40,13 @@ def block_rmse_values(error):
     )
 
 
-def structure_block_rmse(prediction, target, sizes):
+def structure_block_rmse(prediction, target, sizes, *, numbers=None):
     """
     Average block norms within each geometry against symmetrized target labels.
     """
     widths = [9 * n * n for n in sizes]
+    inverse = None if numbers is None else inverse_sqrt_masses(numbers)
+    atom_offset = 0
     values = []
     for p, t, n in zip(
         prediction.split(widths), target.split(widths), sizes, strict=True
@@ -43,7 +58,12 @@ def structure_block_rmse(prediction, target, sizes):
             .reshape(n, 3, n, 3)
             .permute(0, 2, 1, 3)
         )
-        values.append(block_rmse_values(error).mean())
+        norms = block_rmse_values(error)
+        if inverse is not None:
+            mass = inverse[atom_offset : atom_offset + n]
+            norms = norms * mass[:, None] * mass[None, :]
+        values.append(norms.mean())
+        atom_offset += n
     return torch.stack(values).mean()
 
 
