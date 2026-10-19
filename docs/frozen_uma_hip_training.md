@@ -816,3 +816,22 @@ did not show a consistent additional gain; the selected radial tile stays 64.
 The data profile adds at most 8 GiB of staged private host memory, plus queued
 batches. Measured peak GPU allocation stayed near 41.6 GB in the reversed cohort.
 The head, gradients, reductions, and optimizer states retain FP32 precision.
+
+
+`--packed-window-prefetch` loads one future shard window on a background thread
+inside each loader worker. `PACKED_WINDOW_PREFETCH=1` exposes this option through
+the allocation runner. The option defaults to off. Window order, batch order,
+source checks, targets, and arithmetic stay unchanged. A worker can retain its
+current window and one future window. Budget twice the per-window staging memory
+per worker, plus queued batches. With two workers and a 4 GiB window budget,
+staged private memory can reach 16 GiB. Loading errors propagate to the consumer.
+Compare complete training steps across multiple window boundaries before enabling
+this option. Low aggregate CPU use does not rule out a single-thread launch limit.
+
+A ten-second process sample during training used about 1.2 to 1.4 CPU cores
+per run, including two loader workers. Each run allocated eight cores. The main
+process used about one core. More loader workers do not address that launch
+thread or GPU matrix work. A short warm GPU trace attributed about 44% of kernel
+time to matrix products. Treat reduced-precision matrix kernels as an accuracy
+experiment, and test complete-step speed before selecting them. Existing BF16
+MLP and scaled FP16 variants did not consistently improve full training speed.

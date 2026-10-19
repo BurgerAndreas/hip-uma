@@ -62,6 +62,7 @@ def parse_args():
     p.add_argument("--device-prefetch", action="store_true")
     p.add_argument("--threaded-prefetch", action="store_true")
     p.add_argument("--fast-packed-loader", action="store_true")
+    p.add_argument("--packed-window-prefetch", action="store_true")
     p.add_argument("--packed-window-memory-gb", type=float, default=0.0)
     p.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
@@ -387,6 +388,7 @@ def main():
                 feature_cache=cache_root,
                 include_cache_metadata=not args.feature_cache_read_only,
                 fast_packing=args.fast_packed_loader,
+                prefetch_window=args.packed_window_prefetch,
                 window_memory_bytes=int(args.packed_window_memory_gb * 1024**3),
             )
         else:

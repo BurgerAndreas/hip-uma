@@ -159,8 +159,9 @@ def test_read_only_features_skip_writer_metadata_without_losing_cache_hits(tmp_p
     assert sorted(int(sid) for sid in seen) == ids.tolist()
 
 
+@pytest.mark.parametrize("prefetch_window", [False, True])
 def test_packed_windows_mix_sizes_and_cover_rows_once_across_ranks_and_workers(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, prefetch_window
 ):
     from fairchem.core.frozen_hip import packed as module
     from fairchem.core.frozen_hip.data import validation_mask
@@ -212,6 +213,7 @@ def test_packed_windows_mix_sizes_and_cover_rows_once_across_ranks_and_workers(
                 max_atoms=32,
                 pair_budget=128,
                 window_files=4,
+                prefetch_window=prefetch_window,
                 max_passes=1,
                 feature_cache=cache_root,
             )
@@ -243,6 +245,22 @@ def test_packed_windows_mix_sizes_and_cover_rows_once_across_ranks_and_workers(
                         .repeat_interleave(data.natoms, dim=0)
                     )
                     torch.testing.assert_close(data.hip_features, expected)
+            before = [data for batch in stream for data in batch]
+            stream.prefetch_window = not prefetch_window
+            after = [data for batch in stream for data in batch]
+            assert len(before) == len(after)
+            for original, prefetched in zip(before, after, strict=True):
+                assert original.sid == prefetched.sid
+                for key in (
+                    "natoms",
+                    "pos",
+                    "hip_features",
+                    "hip_pair_targets",
+                    "hip_diagonal_targets",
+                ):
+                    torch.testing.assert_close(
+                        getattr(original, key), getattr(prefetched, key), rtol=0, atol=0
+                    )
     assert sorted(seen) == sorted(ids.tolist())
     assert mixed
     assert len(list(cache_root.glob("bundles/*.json"))) == 8

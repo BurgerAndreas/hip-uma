@@ -447,6 +447,7 @@ class PackedHessianStream(IterableDataset):
         include_cache_metadata=True,
         fast_packing=False,
         window_memory_bytes=0,
+        prefetch_window=False,
     ):
         super().__init__()
         self.root, self.markers = Path(root), markers
@@ -462,6 +463,7 @@ class PackedHessianStream(IterableDataset):
         self.fast_packing = fast_packing
         if window_memory_bytes < 0:
             raise ValueError("Window memory budget must be nonnegative")
+        self.prefetch_window = prefetch_window
         self.window_memory_bytes = window_memory_bytes
         if window_files < 1:
             raise ValueError("Packed window size must be positive")
@@ -473,6 +475,69 @@ class PackedHessianStream(IterableDataset):
             pair_budget,
         )
 
+    def _load_window(self, sources):
+        window, staged_bytes = [], 0
+        for source in sources:
+            path = self.root / self.markers[source]
+            values, header = open_packed(path)
+            if "features" in values:
+                if header["backbone_sha256"] != self.backbone_sha256:
+                    raise ValueError("Packed features belong to a different backbone")
+                if (
+                    header.get("backbone_precision", "fp32") != self.backbone_precision
+                    or header.get("tf32", True) != self.tf32
+                ):
+                    raise ValueError(
+                        "Packed features use different inference precision"
+                    )
+                if (
+                    header.get("backbone_graph_version", 2)
+                    != self.backbone_graph_version
+                ):
+                    raise ValueError("Packed features use a different neighbor graph")
+                if header.get("fused_backbone", False) != self.fused_backbone:
+                    raise ValueError("Packed features use different backbone rotations")
+                if header.get("grouped_mole", False) != self.grouped_mole:
+                    raise ValueError("Packed features use different expert kernels")
+                if (
+                    self.grouped_mole
+                    and self.backbone_precision == "fp16"
+                    and header.get("expert_fp32_output", False) is not True
+                ):
+                    raise ValueError(
+                        "Packed features use unsafe expert output precision"
+                    )
+            if self.feature_cache:
+                digest = hashlib.sha256(str(header.get("fingerprint", "")).encode())
+                digest.update(np.asarray(values["omol_index"]).tobytes())
+                digest.update(np.asarray(values["natoms"]).tobytes())
+                source_sha = digest.hexdigest()
+                key = "bundles/" + path.stem
+                if "features" not in values:
+                    features = cached_features(self.feature_cache, key, source_sha)
+                    if features is not None:
+                        values = {**values, "features": features}
+                        header["feature_scale"] = 1.0
+                if self.include_cache_metadata:
+                    header["_cache_meta"] = dict(
+                        hip_cache_key=key,
+                        hip_total_atoms=int(values["atom_ptr"][-1]),
+                        hip_row_count=len(values["natoms"]),
+                        hip_training_rows=np.flatnonzero(
+                            ~validation_mask(values["omol_index"])
+                        ).tolist(),
+                        hip_data_sha256=source_sha,
+                    )
+            if self.window_memory_bytes:
+                values, used = stage_packed_arrays(
+                    values,
+                    self.window_memory_bytes - staged_bytes,
+                    include_targets=self.include_targets,
+                )
+                staged_bytes += used
+            window.append((values, header))
+        return window
+
     def __iter__(self):
         worker = get_worker_info()
         wid, workers = (worker.id, worker.num_workers) if worker else (0, 1)
@@ -483,81 +548,17 @@ class PackedHessianStream(IterableDataset):
             mine = order[self.rank :: self.world][wid::workers]
             if not mine:
                 raise ValueError("Too few packed bundles for all loader workers")
-            for start in range(0, len(mine), self.window_files):
-                window = []
-                staged_bytes = 0
-                for source in mine[start : start + self.window_files]:
-                    path = self.root / self.markers[source]
-                    values, header = open_packed(path)
-                    if "features" in values:
-                        if header["backbone_sha256"] != self.backbone_sha256:
-                            raise ValueError(
-                                "Packed features belong to a different backbone"
-                            )
-                        if (
-                            header.get("backbone_precision", "fp32")
-                            != self.backbone_precision
-                            or header.get("tf32", True) != self.tf32
-                        ):
-                            raise ValueError(
-                                "Packed features use different inference precision"
-                            )
-                        if (
-                            header.get("backbone_graph_version", 2)
-                            != self.backbone_graph_version
-                        ):
-                            raise ValueError(
-                                "Packed features use a different neighbor graph"
-                            )
-                        if header.get("fused_backbone", False) != self.fused_backbone:
-                            raise ValueError(
-                                "Packed features use different backbone rotations"
-                            )
-                        if header.get("grouped_mole", False) != self.grouped_mole:
-                            raise ValueError(
-                                "Packed features use different expert kernels"
-                            )
-                        if (
-                            self.grouped_mole
-                            and self.backbone_precision == "fp16"
-                            and header.get("expert_fp32_output", False) is not True
-                        ):
-                            raise ValueError(
-                                "Packed features use unsafe expert output precision"
-                            )
-                    if self.feature_cache:
-                        digest = hashlib.sha256(
-                            str(header.get("fingerprint", "")).encode()
-                        )
-                        digest.update(np.asarray(values["omol_index"]).tobytes())
-                        digest.update(np.asarray(values["natoms"]).tobytes())
-                        source_sha = digest.hexdigest()
-                        key = "bundles/" + path.stem
-                        if "features" not in values:
-                            features = cached_features(
-                                self.feature_cache, key, source_sha
-                            )
-                            if features is not None:
-                                values = {**values, "features": features}
-                                header["feature_scale"] = 1.0
-                        if self.include_cache_metadata:
-                            header["_cache_meta"] = dict(
-                                hip_cache_key=key,
-                                hip_total_atoms=int(values["atom_ptr"][-1]),
-                                hip_row_count=len(values["natoms"]),
-                                hip_training_rows=np.flatnonzero(
-                                    ~validation_mask(values["omol_index"])
-                                ).tolist(),
-                                hip_data_sha256=source_sha,
-                            )
-                    if self.window_memory_bytes:
-                        values, used = stage_packed_arrays(
-                            values,
-                            self.window_memory_bytes - staged_bytes,
-                            include_targets=self.include_targets,
-                        )
-                        staged_bytes += used
-                    window.append((values, header))
+            sources = (
+                mine[start : start + self.window_files]
+                for start in range(0, len(mine), self.window_files)
+            )
+            if self.prefetch_window:
+                from fairchem.core.frozen_hip.window_prefetch import prefetch_windows
+
+                windows = prefetch_windows(self._load_window, sources)
+            else:
+                windows = map(self._load_window, sources)
+            for window in windows:
                 references, sizes, cached = [], [], []
                 for source, (values, _) in enumerate(window):
                     rows = np.flatnonzero(~validation_mask(values["omol_index"]))
@@ -590,6 +591,7 @@ class PackedHessianStream(IterableDataset):
                             batch, sizes, self.pair_budget
                         )
                     ]
+                del window
             epoch += 1
 
 
