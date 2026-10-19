@@ -856,3 +856,24 @@ and 1024 for FP16 edge mode. The checkpoint and run configuration record it.
 The existing nonfinite gradient guard rejects unsafe updates. This mode changes
 rounding, so compare predictions and projected metrics before selecting it.
 Sampler settings, target normalization, and the loss definition stay unchanged.
+
+
+A matched step benchmark used eight microbatches with 86 geometries and identical
+FP32 cached features, targets, initial parameters, and sample order. The batch
+cap was 16, the atom target was 768, and the quadratic limit was 90,000.
+Repeated FP32 controls measured 355.8 and 356.0 samples/s. Selective FP16 with
+FP32 final projection measured 529.5 samples/s, a 1.49x gain. Peak allocated
+memory changed from 7.41 GB to 4.57 GB. These are short matched-step measurements.
+Production speed also depends on geometry sizes and data arrival.
+
+Prediction relative L2 drift was 0.026% on the first real microbatch. The
+350-atom synthetic stress case showed 0.031% drift and finite backward gradients.
+Parameter-gradient drift ranged from 1.3% to 3.0% across the three loss variants.
+An 86-geometry numerical check covered five trained checkpoints. Projected
+error increases stayed below 1%; the largest abs-cos decrease was 0.0012.
+That check used training examples. It does not replace fixed-cohort validation.
+
+GPU activity can remain near 100% on warm batches, then fall during shard reads.
+Short activity samples do not establish a sustained utilization average.
+After compute kernels become faster, profile data arrival across window
+boundaries and compare prefetch settings on multiple storage conditions.
