@@ -877,3 +877,12 @@ GPU activity can remain near 100% on warm batches, then fall during shard reads.
 Short activity samples do not establish a sustained utilization average.
 After compute kernels become faster, profile data arrival across window
 boundaries and compare prefetch settings on multiple storage conditions.
+
+
+A production canary with parallel window loading averaged 98.8% GPU activity
+across 120 one-second samples, with no zero-activity samples. Its first 1,900
+updates after startup averaged about 902 samples/s. The staging budget stayed
+at 4 GiB per worker per window, with two workers. Earlier 30-second samples
+without window overlap averaged 57% and 75% activity on two runs. These live
+windows used different molecular batches, so they are not a matched speed ratio.
+Keep the matched kernel result separate from the loader observations.
