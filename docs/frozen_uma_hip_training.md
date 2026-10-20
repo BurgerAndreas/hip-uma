@@ -898,7 +898,7 @@ Targets retain their original values and the existing symmetrization policy.
 Packed training retains directed off-diagonal blocks and node blocks. Assembly
 forms `H = C + C^T`. The projection keeps the antisymmetric null space of `C`
 and projects its symmetric part. Three Triton launches compute FP32 row means,
-geometric means, and corrected blocks. The backward uses the same self-adjoint
+grand means, and corrected blocks. The backward uses the same self-adjoint
 linear map. Neither pass assembles or pads a dense Hessian. The extra storage
 contains corrected blocks, nine row values per atom, and nine values per geometry.
 Dense validation uses block means and subtraction, without constructing `P`.
@@ -913,3 +913,37 @@ before and after projection on the fixed validation cohort. It computes all four
 mass-weighted, Eckart-projected metrics, Cartesian errors, and translation
 residuals. Cartesian projection can change the mass-weighted projected metrics
 when atomic masses differ; validation must measure that change.
+
+The paired checkpoint comparison uses the same 10,027 fixed validation samples
+and the last weights at 2,000,000 steps. Both checkpoints use weight decay
+0.0001. Values below use mass weighting and Eckart projection. Compare the
+paired baselines when assessing the correction.
+
+| Checkpoint | Correction | abs cos(v1) | Eigenvalue MAE | Hessian MAE | Hessian RMSE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| mae | None | 0.807613 | 0.076288 | 0.016940 | 0.035025 |
+| mae | Cartesian PHP | 0.806996 | 0.076116 | 0.018110 | 0.035535 |
+| block-rmse | None | 0.809268 | 0.073431 | 0.016643 | 0.034095 |
+| block-rmse | Cartesian PHP | 0.809158 | 0.073384 | 0.018009 | 0.034779 |
+
+Error units are eV/(Angstrom^2 amu). Mean translation residuals fall from
+0.00612 and 0.00634 to approximately 1.47e-8. However, the mass-weighted,
+Eckart-projected Hessian MAE increases by 6.9% and 8.2%. The postprocessing
+correction therefore remains opt-in for existing checkpoints. A separate
+zero-decay Block RMSE ablation trains with the projection in both the loss and
+inference. Its target is 2,000,000 updates, with validation every 400,000 updates.
+Production adoption depends on that ablation's validation results.
+
+A warm microbenchmark compares the packed reference with the Triton projection,
+including a simple backward objective. It shares a GPU with training; these are
+not complete training-step measurements.
+
+| Molecules and atoms | Reference forward/backward | Triton forward/backward |
+| --- | ---: | ---: |
+| 64 molecules, 40 atoms each | 4.65 ms | 0.61 ms |
+| 3 molecules, 16/64/128 atoms | 15.07 ms | 0.87 ms |
+| 1 molecule, 350 atoms | 109.74 ms | 0.61 ms |
+
+Twenty-eight numerical and allocation tests pass, including ragged batches,
+single atoms, 350 atoms, scale extremes, rotation covariance, exact-matrix
+references, gradients, idempotence, and forwarding the allocation setting.
