@@ -706,9 +706,11 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
         # Must be set before graph generation so the computation graph
         # tracks positions and cell through edge distance calculations.
         if not self.regress_config.direct_forces:
-            if self.regress_config.forces or self.regress_config.stress:
+            if (
+                self.regress_config.forces or self.regress_config.stress
+            ) and not data_dict["pos"].requires_grad:
                 data_dict["pos"].requires_grad_(True)
-            if self.regress_config.stress:
+            if self.regress_config.stress and not data_dict["cell"].requires_grad:
                 data_dict["cell"].requires_grad_(True)
 
         with record_function("generate_graph"):
@@ -877,6 +879,8 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
             overrides["radius_pbc_version"] = settings.internal_graph_gen_version
         if settings.use_quaternion_wigner is not None:
             overrides["use_quaternion_wigner"] = settings.use_quaternion_wigner
+        if settings.hessian_vmap is not None:
+            overrides["hessian_vmap"] = settings.hessian_vmap
         if settings.execution_mode is not None:
             overrides["execution_mode"] = settings.execution_mode
 
@@ -1105,7 +1109,7 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
             outputs[forces_key] = {"forces": forces} if self.wrap_property else forces
             outputs[stress_key] = {"stress": stress} if self.wrap_property else stress
         elif self.regress_config.forces and not self.regress_config.direct_forces:
-            forces = compute_forces(energy_part, data["pos"], training=self.training)
+            forces = compute_forces(energy_part, data["pos"], training=create_graph)
             outputs[forces_key] = {"forces": forces} if self.wrap_property else forces
         else:
             forces = None
@@ -1126,7 +1130,7 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
                 forces,
                 data["pos"],
                 vmap=self.regress_config.hessian_vmap,
-                training=create_graph,
+                training=self.training,
             )
             outputs[hessian_key] = (
                 {"hessian": hessian} if self.wrap_property else hessian
