@@ -178,6 +178,15 @@ def test_edge_precision_and_loss_scale_reach_the_trainer(allocation):
     assert "--export=ALL" in submission["args"]
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_translation_projection_reaches_trainer(allocation, enabled):
+    run, env = allocation
+    result = invoke({**env, "TRANSLATION_PROJECTION": "1" if enabled else "0"})
+    assert result.returncode == 0, result.stderr
+    args = json.loads((run / "arguments.json").read_text())
+    assert ("--translation-projection" in args) == enabled
+
+
 def test_completion_cancels_successor_and_future_allocations_skip_training(allocation):
     run, env = allocation
     result = invoke({**env, "OUTPUT_STEP": "2000000"})

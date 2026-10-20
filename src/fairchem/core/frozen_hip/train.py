@@ -92,6 +92,7 @@ def parse_args():
     p.add_argument("--validate-every", type=int, default=400000)
     p.add_argument("--validation-manifest", type=Path)
     p.add_argument("--eval-only", action="store_true")
+    p.add_argument("--translation-projection", action="store_true")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--code-revision")
@@ -195,6 +196,7 @@ def main():
         args.layers = evaluation_state.get("head_layers", args.layers)
         for key, default in (
             ("loss_name", "mse"),
+            ("translation_projection", False),
             ("head_precision", "fp32"),
             ("loss_scale", 1.0),
             ("backbone_precision", "fp32"),
@@ -341,6 +343,8 @@ def main():
             cohort["sample_ids_sha256"],
         ):
             raise ValueError("Checkpoint evaluation cohort differs from this run")
+        if state.get("translation_projection", False) != args.translation_projection:
+            raise ValueError("Resume requires the same translation projection")
         saved_loss = state.get("loss_name", "mse")
         if args.eval_only:
             args.loss = saved_loss
@@ -576,8 +580,23 @@ def main():
 
         edges = sum(n * (n - 1) for n in data.hip_sizes)
         if model.training and edges >= args.checkpoint_edges:
-            return checkpoint(forward, emb["node_embedding"], use_reentrant=False)
-        return forward(emb["node_embedding"])
+            result = checkpoint(forward, emb["node_embedding"], use_reentrant=False)
+        else:
+            result = forward(emb["node_embedding"])
+        if args.translation_projection:
+            from fairchem.core.frozen_hip.translation import (
+                project_blocks,
+                project_dense,
+            )
+
+            if hasattr(data, "hip_pair_targets"):
+                edge, node = project_blocks(
+                    result["edge_blocks"], result["node_blocks"], data
+                )
+                result = {"edge_blocks": edge, "node_blocks": node}
+            else:
+                result = project_dense(result, data.hip_sizes)
+        return result
 
     def save():
         if rank != 0 or args.benchmark:
@@ -598,6 +617,7 @@ def main():
             "head_layers": args.layers,
             "dataset_revision": "7ce83e7425649619c9f85dad485bb2cfd7ee12bd",
             "head_precision": args.head_precision,
+            "translation_projection": args.translation_projection,
             "loss_scale": args.loss_scale,
             "tf32": args.tf32,
             "backbone_precision": args.backbone_precision,
@@ -972,6 +992,7 @@ def main():
         step = state["step"]
         torch.backends.cuda.matmul.allow_tf32 = state.get("tf32", False)
         args.head_precision = state.get("head_precision", "fp32")
+        args.translation_projection = state.get("translation_projection", False)
         args.backbone_precision = state.get("backbone_precision", "fp32")
         args.backbone_graph_version = state.get("backbone_graph_version", 2)
         model.backbone.radius_pbc_version = args.backbone_graph_version

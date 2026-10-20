@@ -886,3 +886,30 @@ at 4 GiB per worker per window, with two workers. Earlier 30-second samples
 without window overlap averaged 57% and 75% activity on two runs. These live
 windows used different molecular batches, so they are not a matched speed ratio.
 Keep the matched kernel result separate from the loader observations.
+
+### Translation sum rule
+
+`--translation-projection` applies `P H P` to each complete Cartesian Hessian,
+where `P = (I - 11^T/N) tensor I_3`. This removes the three translation modes
+before the loss or validation metrics. It preserves matrix symmetry and rotation
+covariance. It does not remove rotational modes from nonstationary geometries.
+Targets retain their original values and the existing symmetrization policy.
+
+Packed training retains directed off-diagonal blocks and node blocks. Assembly
+forms `H = C + C^T`. The projection keeps the antisymmetric null space of `C`
+and projects its symmetric part. Three Triton launches compute FP32 row means,
+geometric means, and corrected blocks. The backward uses the same self-adjoint
+linear map. Neither pass assembles or pads a dense Hessian. The extra storage
+contains corrected blocks, nine row values per atom, and nine values per geometry.
+Dense validation uses block means and subtraction, without constructing `P`.
+
+The checkpoint records `translation_projection`. Resume rejects a different
+setting; evaluation restores the saved setting. Existing checkpoints default to
+`False`. Set `TRANSLATION_PROJECTION=1` for the allocation wrapper. Inference
+consumers must also apply this saved setting to the assembled Hessian.
+
+`tools/evaluate_frozen_hip_translation.py` compares unchanged last checkpoints
+before and after projection on the fixed validation cohort. It computes all four
+mass-weighted, Eckart-projected metrics, Cartesian errors, and translation
+residuals. Cartesian projection can change the mass-weighted projected metrics
+when atomic masses differ; validation must measure that change.
