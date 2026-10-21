@@ -947,3 +947,10 @@ not complete training-step measurements.
 Twenty-eight numerical and allocation tests pass, including ragged batches,
 single atoms, 350 atoms, scale extremes, rotation covariance, exact-matrix
 references, gradients, idempotence, and forwarding the allocation setting.
+
+The allocation wrapper accepts `GLOBAL_BATCH_CAP` and `GLOBAL_ATOM_TARGET`.
+Defaults remain 64 geometries and 2,560 atoms. To double the logical balanced
+batch, set these values to 128 and 5,120. `MICROBATCH_PAIRS` independently limits
+physical GPU work. The trainer accumulates gradients when a logical batch exceeds
+that limit, while preserving equal geometry weights. The existing default of
+524,288 remains the physical work limit for the larger-batch experiment.

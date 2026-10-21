@@ -99,7 +99,8 @@ args=(
     --data "$DATA_ROOT" --packed-data "$PACKED_ROOT" --output "$RUN_ROOT"
     --loss "$LOSS_NAME" --steps "$TARGET_STEPS" --duration "$SEGMENT_SECONDS"
     --weight-decay "${WEIGHT_DECAY:-0}"
-    --max-batch 64 --max-atoms 2560 --microbatch-pairs "${MICROBATCH_PAIRS:-524288}"
+    --max-batch "${GLOBAL_BATCH_CAP:-64}" --max-atoms "${GLOBAL_ATOM_TARGET:-2560}"
+    --microbatch-pairs "${MICROBATCH_PAIRS:-524288}"
     --workers "${LOADER_WORKERS:-2}" --prefetch-factor "${PREFETCH_FACTOR:-8}" --window-shards 8
     --tf32 --backbone-precision fp16 --head-precision "${HEAD_PRECISION:-fp32}"
     --backbone-graph-version 4 --grouped-mole --fused-backbone

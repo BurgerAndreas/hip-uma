@@ -187,6 +187,19 @@ def test_translation_projection_reaches_trainer(allocation, enabled):
     assert ("--translation-projection" in args) == enabled
 
 
+@pytest.mark.parametrize("cap, atoms", [(64, 2560), (128, 5120)])
+def test_balanced_batch_limits_reach_trainer(allocation, cap, atoms):
+    run, env = allocation
+    result = invoke(
+        {**env, "GLOBAL_BATCH_CAP": str(cap), "GLOBAL_ATOM_TARGET": str(atoms)}
+    )
+    assert result.returncode == 0, result.stderr
+    args = json.loads((run / "arguments.json").read_text())
+    assert args[args.index("--max-batch") + 1] == str(cap)
+    assert args[args.index("--max-atoms") + 1] == str(atoms)
+    assert args[args.index("--microbatch-pairs") + 1] == "524288"
+
+
 def test_completion_cancels_successor_and_future_allocations_skip_training(allocation):
     run, env = allocation
     result = invoke({**env, "OUTPUT_STEP": "2000000"})
