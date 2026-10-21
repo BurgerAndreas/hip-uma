@@ -954,3 +954,48 @@ batch, set these values to 128 and 5,120. `MICROBATCH_PAIRS` independently limit
 physical GPU work. The trainer accumulates gradients when a logical batch exceeds
 that limit, while preserving equal geometry weights. The existing default of
 524,288 remains the physical work limit for the larger-batch experiment.
+
+### HIP mixture of linear experts
+
+`--head-experts 4` adds four trainable linear experts to each HIP message block's
+second SO(2) convolution. The first convolution, radial networks, atomwise
+networks, and final node/edge readout remain dense. The frozen UMA backbone and
+its feature-cache identity remain unchanged. The selected configuration has
+3,839,174 trainable parameters, versus 2,901,250 for the dense head.
+
+A separate trainable router uses elemental fractions, total charge, and spin.
+It returns one smooth softmax mixture per geometry, shared across the selected
+SO(2) layers. It consumes neither positions nor atom ordering. The expert
+matrices preserve the real/imaginary SO(2) structure. Shared scalar routing
+therefore retains the original rotation covariance. There is no hard routing,
+expert dropout, or router regularization.
+
+Experts start from copies of the corresponding dense matrix plus small,
+zero-mean perturbations across experts. The initially uniform router preserves
+the dense function up to floating-point rounding. Perturbations allow the gate
+to learn without leaving all experts identical.
+
+Ragged grouped Triton GEMMs process complete molecular edge groups without
+padding. FP16 edge operands use FP32 accumulators; gradients of the mixture
+weights use split reductions and FP32 accumulation. Expert parameters, router,
+optimizer state, Cartesian outputs, and loss remain FP32. Readout compilation
+continues; the MoLE message block uses its explicit grouped kernels directly.
+Checkpoint metadata records the expert count. Resume rejects a different count;
+final evaluation reconstructs the saved architecture and uses the last weights.
+The allocation wrapper accepts `HEAD_EXPERTS`.
+
+A short matched benchmark uses four batches of 64 geometries, identical cached
+features, the MAE loss, and FP16 edge precision. Dense and MoLE message blocks
+both run without block compilation in this comparison. After one warm pass,
+three passes measure full optimizer updates. On this 256-geometry subset,
+dense reaches 2,066 samples/s and four experts reach 1,830 samples/s. Step time
+increases from 31.0 ms to 35.0 ms. Initial output relative error is 0.0171%.
+These measurements share a GPU with training and exclude data loading; they are
+not full-dataset throughput estimates or maximum-memory measurements.
+
+Thirty-nine checks pass across expert routing and GEMMs, the full mixed-precision
+HIP head, existing precision kernels, and allocation behavior. Tests include
+ragged and empty groups, non-aligned dimensions, 350 atoms, long FP32 gradient
+reductions, dense-function initialization, router/expert gradients, and saved
+weights. The MAE ablation uses two million updates, zero weight decay, batch cap
+64, atom target 2,560, and validation every 400,000 updates on the fixed cohort.

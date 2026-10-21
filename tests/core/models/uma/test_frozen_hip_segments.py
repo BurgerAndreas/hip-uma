@@ -200,6 +200,14 @@ def test_balanced_batch_limits_reach_trainer(allocation, cap, atoms):
     assert args[args.index("--microbatch-pairs") + 1] == "524288"
 
 
+def test_head_experts_reach_trainer(allocation):
+    run, env = allocation
+    result = invoke({**env, "HEAD_EXPERTS": "4"})
+    assert result.returncode == 0, result.stderr
+    args = json.loads((run / "arguments.json").read_text())
+    assert args[args.index("--head-experts") + 1] == "4"
+
+
 def test_completion_cancels_successor_and_future_allocations_skip_training(allocation):
     run, env = allocation
     result = invoke({**env, "OUTPUT_STEP": "2000000"})

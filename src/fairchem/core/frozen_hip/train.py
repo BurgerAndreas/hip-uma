@@ -88,6 +88,7 @@ def parse_args():
     )
     p.add_argument("--window-shards", type=int, default=8)
     p.add_argument("--layers", type=int, default=1)
+    p.add_argument("--head-experts", type=int, default=0)
     p.add_argument("--checkpoint-every", type=int, default=500)
     p.add_argument("--validate-every", type=int, default=400000)
     p.add_argument("--validation-manifest", type=Path)
@@ -179,6 +180,12 @@ def parse_args():
         )
     if args.checkpoint_edges is None:
         args.checkpoint_edges = args.microbatch_pairs + 1
+    if args.head_experts == 1 or args.head_experts < 0:
+        p.error("Head experts must be zero (dense) or at least two")
+    if args.head_experts and (
+        args.layers < 1 or args.head_precision not in ("fp32", "fp16-edge")
+    ):
+        p.error("HIP MoLE needs a message block and FP32 or FP16 edge precision")
     return args
 
 
@@ -197,6 +204,7 @@ def main():
         for key, default in (
             ("loss_name", "mse"),
             ("translation_projection", False),
+            ("head_experts", 0),
             ("head_precision", "fp32"),
             ("loss_scale", 1.0),
             ("backbone_precision", "fp32"),
@@ -244,6 +252,7 @@ def main():
         execution_mode=args.execution_mode,
         checkpoint_edges=args.checkpoint_edges,
         backbone_graph_version=args.backbone_graph_version,
+        head_experts=args.head_experts,
     )
     frozen_hash = parameter_hash(model.backbone)
     if args.fused_backbone:
@@ -311,7 +320,8 @@ def main():
         torch._dynamo.config.optimize_ddp = False
         torch._dynamo.config.recompile_limit = 16
         for block in head.blocks:
-            block.compile(dynamic=True)
+            if not args.head_experts:
+                block.compile(dynamic=True)
         if args.projected_readout:
             head.projected_edge_irreps = torch.compile(
                 head.projected_edge_irreps, dynamic=True
@@ -345,6 +355,8 @@ def main():
             raise ValueError("Checkpoint evaluation cohort differs from this run")
         if state.get("translation_projection", False) != args.translation_projection:
             raise ValueError("Resume requires the same translation projection")
+        if state.get("head_experts", 0) != args.head_experts:
+            raise ValueError("Resume requires the same HIP expert count")
         saved_loss = state.get("loss_name", "mse")
         if args.eval_only:
             args.loss = saved_loss
@@ -500,6 +512,8 @@ def main():
             for name in (
                 "pos",
                 "atomic_numbers",
+                "charge",
+                "spin",
                 "atomic_numbers_full",
                 "natoms",
                 "batch",
@@ -618,6 +632,7 @@ def main():
             "dataset_revision": "7ce83e7425649619c9f85dad485bb2cfd7ee12bd",
             "head_precision": args.head_precision,
             "translation_projection": args.translation_projection,
+            "head_experts": args.head_experts,
             "loss_scale": args.loss_scale,
             "tf32": args.tf32,
             "backbone_precision": args.backbone_precision,
@@ -993,6 +1008,7 @@ def main():
         torch.backends.cuda.matmul.allow_tf32 = state.get("tf32", False)
         args.head_precision = state.get("head_precision", "fp32")
         args.translation_projection = state.get("translation_projection", False)
+        args.head_experts = state.get("head_experts", 0)
         args.backbone_precision = state.get("backbone_precision", "fp32")
         args.backbone_graph_version = state.get("backbone_graph_version", 2)
         model.backbone.radius_pbc_version = args.backbone_graph_version

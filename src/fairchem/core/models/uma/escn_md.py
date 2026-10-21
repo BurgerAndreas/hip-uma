@@ -1359,6 +1359,10 @@ class Hessian_Head(nn.Module, HeadInterface):
         if gp_utils.initialized():
             raise NotImplementedError("Hessian_Head does not support graph parallelism")
 
+        if hasattr(self, "hip_mole_router"):
+            from fairchem.core.frozen_hip.mole import prepare_head_mole
+
+            prepare_head_mole(self, data)
         x_edge, wigner, wigner_inv_envelope = self._hessian_edge_features(data, emb)
         if getattr(self, "requires_mole_routing", True):
             self.backbone.set_MOLE_sizes(
