@@ -999,3 +999,113 @@ ragged and empty groups, non-aligned dimensions, 350 atoms, long FP32 gradient
 reductions, dense-function initialization, router/expert gradients, and saved
 weights. The MAE ablation uses two million updates, zero weight decay, batch cap
 64, atom target 2,560, and validation every 400,000 updates on the fixed cohort.
+
+### Nitro-inspired training benchmark
+
+`tools/benchmark_hip_nitro.py` compares experimental trainable fusions with the
+existing compiled, FP16-edge HIP training path. It does not enable the standalone
+UMA Nitro inference model or change production training defaults.
+
+Run the tool inside a GPU allocation. Set these environment variables first:
+
+| Variable | Meaning |
+| --- | --- |
+| `TRAIN_ROOT` | Directory containing `data/packed-targets` and the frozen feature cache. |
+| `HIP_CHECKPOINT` | Dense HIP checkpoint used to initialize every comparison. |
+| `BENCH_ROOT` | Output directory for numerical checks, timings, and operator summaries. |
+
+```sh
+python tools/benchmark_hip_nitro.py
+```
+
+The comparisons cover fused gates, fused LayerNorm plus SiLU, their combination,
+atomic rotation reductions, power-of-two scaled FP16 linear operations, wider
+radial kernel grids, and compilation of the final equivariant normalization.
+The fused normalization includes FP32 weight and bias gradients. Both fusions
+preserve the existing FP16 cast boundaries and FP32 reduction policy.
+
+Every case starts from the same checkpoint and uses the same cached-feature
+batches. Numerical checks compare outputs, loss, and parameter gradients with
+PyTorch. Full-head checks also run after compilation. A candidate fails if its loss differs by more than 0.2%.
+It also fails if its aggregate parameter gradient differs by more than 1% in relative L2 norm. The checks do not establish
+long-run convergence equivalence.
+
+Timings include loss, backward, unscaling, clipping, and a complete AdamW update.
+Each measured step uses one physical batch. Accumulation across several physical
+batches is outside this benchmark.
+They exclude compilation, validation, disk reads, and host-to-device transfers.
+A repeated baseline checks timing drift. The separate CUDA graph experiment
+uses one fixed batch shape; its speed does not establish throughput for changing
+ragged batches. Raw molecular-dynamics throughput from the Nitro release is not
+comparable to these training measurements.
+
+Optional `HIP_BENCH_CASES` selects comma-separated cases. `HIP_BENCH_GRAPH_INDEX`
+selects the fixed batch for the graph experiment. Use `0` for the smallest
+selected edge count. Use `1` for the middle count, or `-1` for the largest count. Eager checks
+use an eager reference. Compiled checks use a compiled reference.
+
+The `scaled14` case scales the maximum operand magnitude into the range
+`[2**14, 2**15)`, with exact power-of-two scale factors and FP32 GEMM outputs.
+The `atomic_wide` case combines atomic rotation reductions with a larger edge
+launch grid. Both cases remain experimental.
+
+The `split_dw` case tests a separate training-only optimization. It splits long
+weight-gradient reductions across GPU programs and accumulates into FP32.
+Forward and input-gradient matrix operations retain the existing vendor path.
+The kernel supports row-strided views and nonzero storage offsets. Set
+`HIP_SPLIT_CHUNK` to `512`, `2048`, or `8192` to select the reduction length.
+The default is `2048`. This case changes FP32 addition order and remains
+experimental until both numerical checks and full-update timings pass.
+
+#### Initial measurements, 2026-10-22
+
+These measurements use one A100-SXM4-80GB GPU with PyTorch 2.8.0 and CUDA 12.8.
+The starting checkpoint is the completed 4M-step, zero-decay, mass-weighted Block
+RMSE model. The three fixed batches contain 116 geometries in total. Their
+directed edge counts are 44,928, 139,412, and 485,640.
+All cases use AdamW at 0.001, zero decay, clipping at 10, and a loss scale of 1024.
+The optimizer uses fused CUDA updates. The baseline source revision is `7b417f8`.
+
+The table compares throughput against the mean of the initial and repeated
+baselines. Baseline drift was approximately 0.26%.
+
+| Case | Mean update time | Throughput change | Peak allocated GPU memory |
+| --- | ---: | ---: | ---: |
+| Existing compiled FP16-edge path | 63.88 ms | reference | 21.75 GB |
+| Fused gate prototype | 69.98 ms | -8.7% | 22.01 GB |
+| Atomic rotation reduction | 65.63 ms | -2.7% | 21.76 GB |
+| Wider radial launch grid | 63.87 ms | within baseline drift | 21.75 GB |
+| Compiled final normalization | 63.93 ms | within baseline drift | 21.74 GB |
+
+The normalization-plus-SiLU prototype exceeded the compiled gradient tolerance
+at approximately 9.5% relative L2 difference. The combined gate/normalization
+prototype also failed that check. The original scalar scaling prototype changed
+gradients by approximately 59%. These cases did not proceed to timing.
+
+These results support retaining the existing compiled operations for these paths.
+They do not measure Nitro's standalone molecular-dynamics inference backend.
+
+The follow-up tests also retained the current kernels. Wider atomic reductions
+reduced throughput by approximately 4.3%. The split weight-gradient kernel
+reduced throughput by approximately 19%. The full-step comparison used
+`HIP_SPLIT_CHUNK=8192`. Its shorter internal partial sums passed
+the FP64 accuracy checks. Those checks did not imply a performance benefit.
+Nitro-style FP16 operand scaling also exceeded the full-head gradient tolerance.
+
+Fixed-shape CUDA graph replay gave the only clear timing gain:
+
+| Physical batch | Directed edges | Ordinary execution | Graph replay | Throughput gain |
+| --- | ---: | ---: | ---: | ---: |
+| 64 geometries, 27 atoms each | 44,928 | 19.93 ms | 14.68 ms | +35.8% |
+| 46 geometries, at most 56 atoms | 139,412 | 43.05 ms | 40.47 ms | +6.4% |
+
+After three matched updates, global parameter differences stayed below `1.6e-6`
+in relative L2 norm for these two graph tests. Both losses remained finite.
+The frozen backbone checksum also stayed unchanged. The CUDA kernel suite passed
+all 22 tests, including strided views, storage offsets, tiny operands, and long
+FP32 reductions.
+
+These graph timings exclude input copies and disk reads. They use a constant
+learning rate and one fixed physical batch per replay. Production integration
+needs a bounded shape cache, the changing learning rate, and gradient accumulation.
+The existing training defaults remain the measured baseline.
