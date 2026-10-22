@@ -1371,6 +1371,10 @@ class Hessian_Head(nn.Module, HeadInterface):
                 edge_index=data.edge_index_hessian,
             )
         node_embedding = emb["node_embedding"].clone()
+        if hasattr(self, "hip_charge_spin"):
+            node_embedding = self.hip_charge_spin(
+                node_embedding, data.charge, data.spin, data.batch
+            )
         for layer_idx, block in enumerate(self.blocks):
             with record_function(f"hessian message passing {layer_idx}"):
                 node_embedding = block(

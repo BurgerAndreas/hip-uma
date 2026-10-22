@@ -42,6 +42,7 @@ class FrozenHIP(nn.Module):
         checkpoint_edges=20000,
         backbone_graph_version=None,
         head_experts=0,
+        head_charge_spin=False,
     ):
         super().__init__()
         settings = InferenceSettings(
@@ -67,6 +68,12 @@ class FrozenHIP(nn.Module):
             from fairchem.core.frozen_hip.mole import enable_head_mole
 
             enable_head_mole(self.head, head_experts)
+        if head_charge_spin:
+            from fairchem.core.frozen_hip.conditioning import (
+                enable_charge_spin_conditioning,
+            )
+
+            enable_charge_spin_conditioning(self.head)
         # Dense HIP layers do not consume the backbone's expert routing sizes.
         # Avoid copying those sizes to the host after each complete HIP graph.
         self.head.requires_mole_routing = any(
