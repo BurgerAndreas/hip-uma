@@ -185,6 +185,10 @@ def parse_args():
         p.error(
             "Fused radial operations require fused rotations and FP32 or FP16 edge precision"
         )
+    if args.head_width_multiplier < 1:
+        p.error("Head width multiplier must be positive")
+    if args.cuda_graphs and (not args.packed_data or not args.feature_cache_read_only):
+        p.error("Training graphs require packed data and read-only cached features")
     if args.checkpoint_edges is None:
         args.checkpoint_edges = args.microbatch_pairs + 1
     if args.head_experts == 1 or args.head_experts < 0:
@@ -252,6 +256,12 @@ def main():
         raise ValueError("Global batch limits must be divisible by the rank count")
     torch.cuda.set_device(local)
     device = torch.device("cuda", local)
+    if args.cuda_graphs:
+        # Older autograd versions retain a node's first CUDA stream. Keep that
+        # stream capturable when later backward passes enter a CUDA graph.
+        training_stream = torch.cuda.Stream(device=device)
+        training_stream.wait_stream(torch.cuda.current_stream(device))
+        torch.cuda.set_stream(training_stream)
     if world > 1:
         dist.init_process_group("nccl", device_id=device)
     torch.set_num_threads(2)

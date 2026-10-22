@@ -1120,7 +1120,7 @@ at learning rates 0.0003, 0.001, and 0.003. Each run uses ordinary Block RMSE,
 zero weight decay, no dropout, and four million optimizer updates.
 
 Keep the balanced atom sampler, 64-geometry cap, and 2,560-atom target.
-Split quadratic work above 196,608 atom pairs into gradient accumulation.
+Use architecture-specific quadratic work limits and gradient accumulation.
 The FP16 edge kernels retain FP32 parameters, gradients, normalization statistics,
 final projection, loss, and optimizer state. Retain the measured radial,
 rotation, scatter, and projected-readout optimizations.
@@ -1131,6 +1131,9 @@ Fresh coordinates, targets, features, and geometry pointers enter each replay.
 The ordinary optimizer applies the current learning rate and clips accumulated
 gradients once per logical batch. Uncached shapes use the compiled training path.
 Graphs do not change the logical batch size or introduce geometry padding.
+Construct the model on a non-default CUDA stream. This keeps older autograd
+stream metadata compatible with capture. A shared lock pauses device prefetch
+only during capture; ordinary replay retains transfer overlap.
 
 `tools/prepare_frozen_hip_release.py` stages a pinned published snapshot. It reuses
 existing packed targets and frozen features. It reads missing original rows and

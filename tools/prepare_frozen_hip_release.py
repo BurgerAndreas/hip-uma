@@ -43,9 +43,7 @@ def download_file(task):
     if args.sparse_base and row["parent_partition"] == 0:
         # Fetch only metadata and the missing label spans from immutable files.
         # The hub binds each byte range to the pinned commit and content hash.
-        from huggingface_hub import HfFileSystem
-
-        fs = HfFileSystem(token=args.token.read_text().strip())
+        fs = args.hub_filesystem
         name = (
             "datasets/"
             + inventory["repository"]
@@ -54,10 +52,7 @@ def download_file(task):
             + "/"
             + row["path"]
         )
-        info = fs.info(name)
-        if info["size"] != row["bytes"]:
-            raise ValueError("Pinned source size differs from the catalog")
-        return fs.open(name, "rb", block_size=65536)
+        return fs.open(name, "rb", block_size=65536, size=row["bytes"])
     target = args.output / "downloads" / row["path"]
     target.parent.mkdir(parents=True, exist_ok=True)
     marker = target.with_suffix(".checked")
@@ -275,6 +270,11 @@ def main():
         p.error("Invalid worker rank")
     torch.set_num_threads(2)
     torch.backends.cuda.matmul.allow_tf32 = True
+    if args.sparse_base:
+        from huggingface_hub import HfFileSystem
+
+        args.hub_filesystem = HfFileSystem(token=args.token.read_text().strip())
+    print(json.dumps(dict(event="scan_legacy", worker=args.rank)), flush=True)
     legacy = []
     for path in sorted(args.legacy_packed.glob("*.hip")):
         values, _ = open_packed(path)
@@ -285,6 +285,7 @@ def main():
             target.symlink_to(path.resolve())
         except FileExistsError:
             pass
+    print(json.dumps(dict(event="legacy_scanned", bundles=len(legacy))), flush=True)
     legacy_ids = np.sort(np.concatenate(legacy))
     del legacy
     allowed_base = np.sort(np.load(args.manifests / "sample_10m.npz")["indices"])
@@ -296,6 +297,7 @@ def main():
         raise ValueError("Legacy data leave the new training split")
     model = FrozenHIP("cuda", backbone_graph_version=4).eval()
     del model.head
+    print(json.dumps(dict(event="backbone_loaded")), flush=True)
     frozen = parameter_hash(model.backbone)
     enable_grouped_mole(model.backbone)
     enable_fused_rotations(model.backbone)
@@ -327,6 +329,10 @@ def main():
         if path.exists() and receipt.exists():
             entries.append(json.loads(receipt.read_text()))
             continue
+        print(
+            json.dumps(dict(event="read_group", group=index, files=len(group))),
+            flush=True,
+        )
         parts = []
         with ThreadPoolExecutor(max_workers=4) as pool:
             for record, source in zip(
@@ -359,6 +365,7 @@ def main():
         with torch.inference_mode():
             for rows in sampler:
                 data = make_batch(values, np.asarray(rows))
+                data.hip_sizes = data.natoms.tolist()
                 device = data.clone().cuda()
                 emb = model.features(device, "fp16")["node_embedding"].float().cpu()
                 if not torch.isfinite(emb).all():

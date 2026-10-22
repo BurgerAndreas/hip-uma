@@ -7,15 +7,18 @@ learning rates, gradient clipping, and logical-batch gradient accumulation.
 from __future__ import annotations
 
 from collections import Counter
+from threading import RLock
 
 import torch
+
+CUDA_CAPTURE_LOCK = RLock()
 
 
 class TrainingGraphs:
     """Keep a fixed number of small, recurring shapes; use eager fallback."""
 
     def __init__(
-        self, parameters, loss, *, capacity=2, max_edges=100000, loss_scale=1024.0
+        self, parameters, loss, *, capacity=2, max_edges=65536, loss_scale=1024.0
     ):
         if capacity < 0:
             raise ValueError("Graph capacity must be nonnegative")
@@ -65,35 +68,36 @@ class TrainingGraphs:
             self.seen[key] += 1
             if self.seen[key] < 3:
                 return None
-            static = data.clone()
-            original = [p.grad for p in self.parameters]
-            stream = torch.cuda.Stream()
-            stream.wait_stream(torch.cuda.current_stream())
-            try:
-                with torch.cuda.stream(stream):
-                    # Finish lazy compilation before capture. Allocate gradient
-                    # outputs inside the graph, as required by CUDA autograd.
-                    for _ in range(2):
-                        for p in self.parameters:
-                            p.grad = None
-                        (self.loss(static) * self.loss_scale).backward()
-                torch.cuda.current_stream().wait_stream(stream)
-                torch.cuda.synchronize()
-                for p in self.parameters:
-                    p.grad = None
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    value = self.loss(static)
-                    (value * self.loss_scale).backward()
-                private = [
-                    p.grad if p.grad is not None else torch.zeros_like(p)
-                    for p in self.parameters
-                ]
-            finally:
-                for p, g in zip(self.parameters, original, strict=True):
-                    p.grad = g
-            self.graphs[key] = (graph, static, private, value)
-            self.captures += 1
+            with CUDA_CAPTURE_LOCK:
+                static = data.clone()
+                original = [p.grad for p in self.parameters]
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                try:
+                    with torch.cuda.stream(stream):
+                        # Finish lazy compilation before capture. Allocate gradient
+                        # outputs inside the graph, as required by CUDA autograd.
+                        for _ in range(2):
+                            for p in self.parameters:
+                                p.grad = None
+                            (self.loss(static) * self.loss_scale).backward()
+                    torch.cuda.current_stream().wait_stream(stream)
+                    torch.cuda.synchronize()
+                    for p in self.parameters:
+                        p.grad = None
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        value = self.loss(static)
+                        (value * self.loss_scale).backward()
+                    private = [
+                        p.grad if p.grad is not None else torch.zeros_like(p)
+                        for p in self.parameters
+                    ]
+                finally:
+                    for p, g in zip(self.parameters, original, strict=True):
+                        p.grad = g
+                self.graphs[key] = (graph, static, private, value)
+                self.captures += 1
         graph, static, private, value = self.graphs[key]
         # Copy fresh inputs, including targets, pointers, positions and features.
         # Python shape metadata is part of the exact capture key.

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import torch
 
+from fairchem.core.frozen_hip.graphs import CUDA_CAPTURE_LOCK
+
 
 class DeviceBatchPrefetcher:
     """Retain one prepared batch and track its tensors across CUDA streams."""
@@ -96,9 +98,12 @@ class ThreadedDeviceBatchPrefetcher:
                 for host in self.source:
                     if self.stopped.is_set():
                         return
-                    batch = [self.move(data) for data in host]
-                    event = torch.cuda.Event()
-                    event.record(self.stream)
+                    # Capture forbids unrelated device work from other threads.
+                    # Resume transfer overlap as soon as capture has finished.
+                    with CUDA_CAPTURE_LOCK:
+                        batch = [self.move(data) for data in host]
+                        event = torch.cuda.Event()
+                        event.record(self.stream)
                     self._publish((batch, event, None))
                 self._publish((None, None, None))
         except BaseException as error:
