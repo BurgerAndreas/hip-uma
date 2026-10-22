@@ -16,6 +16,7 @@ from tests.core.models.uma.test_hessian_head import _sample, _tiny_backbone
 
 
 @pytest.mark.parametrize("layers", [1, 2])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_wider_head_preserves_shape_and_backbone(layers):
     backbone = _tiny_backbone().cuda().eval().requires_grad_(False)
     original = {k: p.detach().clone() for k, p in backbone.named_parameters()}
@@ -33,6 +34,7 @@ def test_wider_head_preserves_shape_and_backbone(layers):
         torch.testing.assert_close(p, original[k], rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_graph_inputs_accumulation_and_learning_rates():
 
     torch.manual_seed(7)
@@ -141,6 +143,7 @@ def test_published_upper_labels_and_parent_namespaces(tmp_path):
         selected_arrays(path, record, np.array([4]), np.array([4]))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_graph_replays_changed_molecular_partitions():
     import numpy as np
 

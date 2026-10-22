@@ -96,6 +96,7 @@ def parse_args():
         "--dataset-revision", default="7ce83e7425649619c9f85dad485bb2cfd7ee12bd"
     )
     p.add_argument("--head-experts", type=int, default=0)
+    p.add_argument("--head-charge-spin", action="store_true")
     p.add_argument("--checkpoint-every", type=int, default=500)
     p.add_argument("--validate-every", type=int, default=400000)
     p.add_argument("--validation-manifest", type=Path)
@@ -222,6 +223,7 @@ def main():
             ("loss_name", "mse"),
             ("translation_projection", False),
             ("head_experts", 0),
+            ("head_charge_spin", False),
             ("head_precision", "fp32"),
             ("loss_scale", 1.0),
             ("backbone_precision", "fp32"),
@@ -277,6 +279,7 @@ def main():
         checkpoint_edges=args.checkpoint_edges,
         backbone_graph_version=args.backbone_graph_version,
         head_experts=args.head_experts,
+        head_charge_spin=args.head_charge_spin,
     )
     frozen_hash = parameter_hash(model.backbone)
     for manifest in (cohort, final_cohort):
@@ -393,6 +396,8 @@ def main():
             raise ValueError("Resume requires the same dataset revision")
         if state.get("head_experts", 0) != args.head_experts:
             raise ValueError("Resume requires the same HIP expert count")
+        if state.get("head_charge_spin", False) != args.head_charge_spin:
+            raise ValueError("Resume requires the same charge/spin conditioning")
         saved_loss = state.get("loss_name", "mse")
         if args.eval_only:
             args.loss = saved_loss
@@ -701,6 +706,7 @@ def main():
             "head_precision": args.head_precision,
             "translation_projection": args.translation_projection,
             "head_experts": args.head_experts,
+            "head_charge_spin": args.head_charge_spin,
             "loss_scale": args.loss_scale,
             "tf32": args.tf32,
             "backbone_precision": args.backbone_precision,
@@ -1118,6 +1124,7 @@ def main():
         args.head_precision = state.get("head_precision", "fp32")
         args.translation_projection = state.get("translation_projection", False)
         args.head_experts = state.get("head_experts", 0)
+        args.head_charge_spin = state.get("head_charge_spin", False)
         args.backbone_precision = state.get("backbone_precision", "fp32")
         args.backbone_graph_version = state.get("backbone_graph_version", 2)
         model.backbone.radius_pbc_version = args.backbone_graph_version

@@ -127,6 +127,7 @@ if [[ "${DEVICE_PREFETCH:-0}" == 1 ]]; then args+=(--device-prefetch); fi
 if [[ "${THREADED_PREFETCH:-0}" == 1 ]]; then args+=(--threaded-prefetch); fi
 if [[ "${FAST_PACKED_LOADER:-0}" == 1 ]]; then args+=(--fast-packed-loader); fi
 if [[ "${TRANSLATION_PROJECTION:-0}" == 1 ]]; then args+=(--translation-projection); fi
+if [[ "${HEAD_CHARGE_SPIN:-0}" == 1 ]]; then args+=(--head-charge-spin); fi
 if [[ -n "${HEAD_EXPERTS:-}" ]]; then args+=(--head-experts "$HEAD_EXPERTS"); fi
 if [[ -n "${LOSS_SCALE:-}" ]]; then args+=(--loss-scale "$LOSS_SCALE"); fi
 if [[ "${PACKED_WINDOW_PREFETCH:-0}" == 1 ]]; then args+=(--packed-window-prefetch); fi

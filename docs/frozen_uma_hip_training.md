@@ -1157,3 +1157,24 @@ for all 200,000 validation IDs and loads the last checkpoint. An incomplete fina
 label set produces `final_evaluation_pending.json`; it never produces a partial
 final score. The allocation chain stops after training if final labels remain
 missing. Complete the final manifest and use evaluation-only mode to finish.
+
+### Explicit charge and spin conditioning
+
+`--head-charge-spin` enables a small FP32 conditioning network in the dense HIP
+head. The allocation wrapper exposes it as `HEAD_CHARGE_SPIN=1`. Its inputs are
+`charge / 10` and `(spin - 1) / 10`; spin denotes multiplicity. A 32-unit SiLU
+network produces channel gains and scalar offsets before the HIP message block.
+Gains are shared across angular components. Offsets affect only the scalar
+component, which preserves equivariance.
+
+The final conditioning layer starts at zero. Initial predictions therefore match
+the dense head exactly. Initialization preserves the existing random stream.
+Frozen cached features remain valid. Parameters and conditioning arithmetic use
+FP32 even when the edge calculations use FP16. Checkpoints record the option;
+resuming with a different setting raises an error. Evaluation restores the saved
+architecture.
+
+For a matched two-million-update ablation, use the dense MAE, zero-decay run as
+the baseline. Keep the 64-geometry cap, 2,560-atom target, physical work limit,
+seed, learning-rate schedule, and fixed validation cohort unchanged. This baseline
+has the lowest eigenvalue MAE among the completed two-million-update runs.
