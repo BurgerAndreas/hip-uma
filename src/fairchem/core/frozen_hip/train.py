@@ -88,6 +88,13 @@ def parse_args():
     )
     p.add_argument("--window-shards", type=int, default=8)
     p.add_argument("--layers", type=int, default=1)
+    p.add_argument("--head-width-multiplier", type=int, default=1)
+    p.add_argument("--cuda-graphs", action="store_true")
+    p.add_argument("--cuda-graph-cache", type=int, default=2)
+    p.add_argument("--final-validation-manifest", type=Path)
+    p.add_argument(
+        "--dataset-revision", default="7ce83e7425649619c9f85dad485bb2cfd7ee12bd"
+    )
     p.add_argument("--head-experts", type=int, default=0)
     p.add_argument("--checkpoint-every", type=int, default=500)
     p.add_argument("--validate-every", type=int, default=400000)
@@ -193,6 +200,11 @@ def main():
     args = parse_args()
     cohort_path = args.validation_manifest or args.data / "validation_10000.json"
     cohort = load_manifest(cohort_path)
+    final_cohort = (
+        load_manifest(args.final_validation_manifest)
+        if args.final_validation_manifest
+        else cohort
+    )
     if args.eval_only and not (args.output / "latest.pt").exists():
         raise FileNotFoundError("Final evaluation requires the last saved checkpoint")
     evaluation_state = None
@@ -201,6 +213,7 @@ def main():
             args.output / "latest.pt", map_location="cpu", weights_only=False
         )
         args.layers = evaluation_state.get("head_layers", args.layers)
+        args.head_width_multiplier = evaluation_state.get("head_width_multiplier", 1)
         for key, default in (
             ("loss_name", "mse"),
             ("translation_projection", False),
@@ -249,12 +262,16 @@ def main():
     model = FrozenHIP(
         device,
         layers=args.layers,
+        head_width_multiplier=args.head_width_multiplier,
         execution_mode=args.execution_mode,
         checkpoint_edges=args.checkpoint_edges,
         backbone_graph_version=args.backbone_graph_version,
         head_experts=args.head_experts,
     )
     frozen_hash = parameter_hash(model.backbone)
+    for manifest in (cohort, final_cohort):
+        if manifest.get("backbone_sha256") not in (None, frozen_hash):
+            raise ValueError("Evaluation manifest uses another frozen backbone")
     if args.fused_backbone:
         enable_fused_rotations(model.backbone)
     if args.grouped_mole:
@@ -353,8 +370,17 @@ def main():
             cohort["sample_ids_sha256"],
         ):
             raise ValueError("Checkpoint evaluation cohort differs from this run")
+        if state.get("final_validation_sample_ids_sha256") not in (
+            None,
+            final_cohort["sample_ids_sha256"],
+        ):
+            raise ValueError("Checkpoint final evaluation cohort differs")
         if state.get("translation_projection", False) != args.translation_projection:
             raise ValueError("Resume requires the same translation projection")
+        if state.get("head_width_multiplier", 1) != args.head_width_multiplier:
+            raise ValueError("Resume requires the same head width")
+        if state.get("dataset_revision") != args.dataset_revision:
+            raise ValueError("Resume requires the same dataset revision")
         if state.get("head_experts", 0) != args.head_experts:
             raise ValueError("Resume requires the same HIP expert count")
         saved_loss = state.get("loss_name", "mse")
@@ -534,9 +560,9 @@ def main():
         else:
             # Boolean periodic flags control Python branches in graph generation.
             data.apply(
-                lambda value: value
-                if value is pbc
-                else value.to(device, non_blocking=True)
+                lambda value: (
+                    value if value is pbc else value.to(device, non_blocking=True)
+                )
             )
         data.hip_sizes = sizes
         data.hip_fused_loss = args.fused_rotations
@@ -612,6 +638,35 @@ def main():
                 result = project_dense(result, data.hip_sizes)
         return result
 
+    def training_loss(data):
+        prediction = predict(data)
+        if not hasattr(data, "hip_pair_targets"):
+            raise ValueError("CUDA graphs require packed Hessian targets")
+        function = {
+            "mse": block_mse,
+            "mae": block_mae,
+            "block-rmse": block_rmse,
+            "mass-block-rmse": block_rmse,
+        }[args.loss]
+        return function(
+            prediction["edge_blocks"],
+            prediction["node_blocks"],
+            data,
+            **({"mass_weighted": True} if args.loss == "mass-block-rmse" else {}),
+        )
+
+    graph_runner = None
+    if args.cuda_graphs:
+        if world != 1 or args.head_experts or args.profile_steps:
+            raise ValueError(
+                "Training graphs require one GPU, a dense head, and no profiler"
+            )
+        from fairchem.core.frozen_hip.graphs import TrainingGraphs
+
+        graph_runner = TrainingGraphs(
+            head.parameters(), training_loss, capacity=args.cuda_graph_cache
+        )
+
     def save():
         if rank != 0 or args.benchmark:
             return
@@ -629,7 +684,10 @@ def main():
             "backbone": "uma-s-1p2",
             "backbone_sha256": frozen_hash,
             "head_layers": args.layers,
-            "dataset_revision": "7ce83e7425649619c9f85dad485bb2cfd7ee12bd",
+            "head_width_multiplier": args.head_width_multiplier,
+            "final_validation_sample_ids_sha256": final_cohort["sample_ids_sha256"],
+            "cuda_graphs": args.cuda_graphs,
+            "dataset_revision": args.dataset_revision,
             "head_precision": args.head_precision,
             "translation_projection": args.translation_projection,
             "head_experts": args.head_experts,
@@ -688,6 +746,27 @@ def main():
         )
 
     def evaluate(*, final=False):
+        cohort = (
+            load_manifest(args.final_validation_manifest)
+            if final and args.final_validation_manifest
+            else load_manifest(cohort_path)
+        )
+        if final and not cohort.get("complete", True):
+            if rank == 0:
+                row = dict(
+                    event="final_evaluation_pending",
+                    step=step,
+                    reason="missing_labels",
+                    required_samples=cohort["samples"],
+                    available_samples=cohort.get("available_samples", 0),
+                    sample_ids_sha256=cohort["sample_ids_sha256"],
+                    from_last_checkpoint=True,
+                )
+                (args.output / "final_evaluation_pending.json").write_text(
+                    json.dumps(row, indent=2) + "\n"
+                )
+                print(json.dumps(row), flush=True)
+            return
         from fairchem.core.frozen_hip.metrics import (
             mass_weighted_eckart_totals,
             projected_metric_record,
@@ -777,6 +856,7 @@ def main():
                 temporary = args.output / "final_evaluation.tmp"
                 temporary.write_text(json.dumps(row, indent=2) + "\n")
                 temporary.replace(args.output / "final_evaluation.json")
+                (args.output / "final_evaluation_pending.json").unlink(missing_ok=True)
             print(json.dumps(row), flush=True)
             with (args.output / "evaluation.jsonl").open("a") as f:
                 f.write(json.dumps(row) + "\n")
@@ -790,7 +870,9 @@ def main():
             initial_head_sha256=initial_head_hash,
             head_parameters=sum(p.numel() for p in head.parameters()),
             world_size=world,
-            validation="fixed_parent_holdout_cohort_v1",
+            validation=cohort["selection"],
+            final_validation_samples=final_cohort["samples"],
+            final_validation_sample_ids_sha256=final_cohort["sample_ids_sha256"],
             validation_samples=cohort["samples"],
             validation_sample_ids_sha256=cohort["sample_ids_sha256"],
             available_shards_at_start=len(inventory),
@@ -830,6 +912,19 @@ def main():
                 with phase("device_transfer"):
                     data = host_data if args.device_prefetch else move(host_data)
                 b = len(data.hip_sizes)
+                graph_loss = (
+                    graph_runner.backward(data, b * args.loss_scale / count)
+                    if graph_runner is not None
+                    else None
+                )
+                if graph_loss is not None:
+                    metrics[0].add_(graph_loss, alpha=b)
+                    host_metrics[0] += b
+                    host_metrics[1] += sum(data.hip_sizes)
+                    host_metrics[2] += b
+                    host_metrics[3] += 1
+                    host_batches[micro_index] = None
+                    continue
                 # Only the last microbatch synchronizes gradients. Every molecule
                 # keeps its weight in the same global optimizer batch.
                 context = (
@@ -927,6 +1022,10 @@ def main():
                         "mean_global_batch": values[1] / window_updates,
                         "mean_global_atoms": values[2] / window_updates,
                         "step": step,
+                        "cuda_graph_hits": graph_runner.hits if graph_runner else 0,
+                        "cuda_graph_captures": graph_runner.captures
+                        if graph_runner
+                        else 0,
                         "loss_name": args.loss,
                         args.loss.replace("-", "_"): values[0] / values[1],
                         "samples_s": values[1] / elapsed,
@@ -950,7 +1049,7 @@ def main():
             if (
                 not args.benchmark
                 and step % args.validate_every == 0
-                and step < args.steps
+                and (step < args.steps or args.final_validation_manifest is not None)
             ):
                 evaluate()
                 window = time.monotonic()

@@ -54,7 +54,9 @@ def finish(*_):
     step = int(os.environ["OUTPUT_STEP"])
     if os.environ.get("STOP_DURING_TRAIN"): (root/"STOP").touch()
     (root/"session.json").write_text(json.dumps(dict(step=step, frozen_backbone_verified=True)))
-    if step >= int(args[args.index("--steps")+1]):
+    if os.environ.get("PENDING_FINAL"):
+        (root/"final_evaluation_pending.json").write_text(json.dumps(dict(reason="missing_labels")))
+    elif step >= int(args[args.index("--steps")+1]):
         (root/"final_evaluation.json").write_text(json.dumps(dict(step=step, from_last_checkpoint=True)))
     raise SystemExit(int(os.environ.get("FAIL_TRAIN", "0")))
 if os.environ.get("WAIT_FOR_SIGNAL"):
@@ -328,3 +330,40 @@ def test_failed_allocation_does_not_reuse_an_invalid_dependency(allocation):
     second = invoke(env)
     assert second.returncode == 0, second.stderr
     assert len(read_lines(run / "submissions.jsonl")) == 2
+
+
+def test_complete_training_does_not_repeat_missing_final_labels(allocation):
+    run, env = allocation
+    result = invoke({**env, "OUTPUT_STEP": "2000000", "PENDING_FINAL": "1"})
+    assert result.returncode == 0, result.stderr
+    assert (run / "final_evaluation_pending.json").exists()
+    assert not (run / "final_evaluation.json").exists()
+    assert json.loads((run / "cancelled.json").read_text()) == ["5555"]
+
+
+def test_expanded_sweep_settings_reach_the_trainer(allocation):
+    run, env = allocation
+    values = dict(
+        LEARNING_RATE="0.0003",
+        HEAD_LAYERS="2",
+        HEAD_WIDTH_MULTIPLIER="2",
+        CUDA_GRAPHS="1",
+        CUDA_GRAPH_CACHE="2",
+        VALIDATION_MANIFEST="monitor.json",
+        FINAL_VALIDATION_MANIFEST="final.json",
+        DATASET_REVISION="a" * 40,
+    )
+    result = invoke({**env, **values})
+    assert result.returncode == 0, result.stderr
+    args = json.loads((run / "arguments.json").read_text())
+    for flag, value in [
+        ("--lr", "0.0003"),
+        ("--layers", "2"),
+        ("--head-width-multiplier", "2"),
+        ("--cuda-graph-cache", "2"),
+        ("--validation-manifest", "monitor.json"),
+        ("--final-validation-manifest", "final.json"),
+        ("--dataset-revision", "a" * 40),
+    ]:
+        assert args[args.index(flag) + 1] == value
+    assert "--cuda-graphs" in args

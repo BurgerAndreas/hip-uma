@@ -131,6 +131,18 @@ def load_manifest(path):
     Reject changed membership, duplicate samples, or a different source snapshot.
     """
     manifest = json.loads(Path(path).read_text())
+    if manifest.get("selection") == "release-holdout-v2":
+        ids = manifest["sample_ids"]
+        if (
+            len(ids) != manifest["samples"]
+            or len(set(ids)) != len(ids)
+            or sample_fingerprint(ids) != manifest["sample_ids_sha256"]
+            or any(i < (1 << 60) for i in ids)
+        ):
+            raise ValueError("Release validation identities differ")
+        if len(manifest["dataset_revision"]) != 40:
+            raise ValueError("Pin the release to a full dataset revision")
+        return manifest
     if (
         manifest["selection"] != SELECTION
         or manifest["dataset_revision"] != DATA_REVISION
@@ -282,6 +294,52 @@ class EvaluationStream(IterableDataset):
         self.pair_budget, self.window_files = pair_budget, window_files
 
     def __iter__(self):
+        if self.manifest.get("selection") == "release-holdout-v2":
+            if not self.manifest.get("complete"):
+                raise ValueError(
+                    "Final validation labels are incomplete; retain the last checkpoint"
+                )
+            from fairchem.core.frozen_hip.packed import open_packed
+
+            entries = self.manifest["entries"][self.rank :: self.world]
+            worker = get_worker_info()
+            if worker:
+                entries = entries[worker.id :: worker.num_workers]
+            for entry in entries:
+                path = Path(entry["path"])
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("Evaluation paths must be relative")
+                values, header = open_packed(Path(self.root) / path)
+                if header.get("dataset_revision") != self.manifest["dataset_revision"]:
+                    raise ValueError("Evaluation source revision differs")
+                if header.get("backbone_sha256") != self.manifest.get(
+                    "backbone_sha256"
+                ):
+                    raise ValueError(
+                        "Evaluation features use a different frozen backbone"
+                    )
+                rows = np.asarray(entry["rows"], dtype=np.int64)
+                if values["omol_index"][rows].tolist() != entry["omol_indices"]:
+                    raise ValueError("Evaluation source identities differ")
+                sampler = BalancedBatchSampler(
+                    values["natoms"][rows],
+                    max_atoms=self.max_atoms,
+                    batch_size=self.max_batch,
+                    pair_budget=self.pair_budget,
+                )
+                for indices in sampler:
+                    selected = rows[indices]
+                    # Evaluation retains dense labels for the projected eigensystem.
+                    data = make_batch(values, selected)
+                    ap = values["atom_ptr"]
+                    data.hip_features = torch.from_numpy(
+                        np.concatenate(
+                            [values["features"][ap[i] : ap[i + 1]] for i in selected]
+                        )
+                    )
+                    data.hip_feature_scale = header.get("feature_scale", 1.0)
+                    yield data
+            return
         cache_path = Path(self.root) / "validation_10000.hip"
         if cache_path.exists():
             from fairchem.core.frozen_hip.packed import open_packed

@@ -38,6 +38,7 @@ class FrozenHIP(nn.Module):
         device,
         *,
         layers=1,
+        head_width_multiplier=1,
         execution_mode="general",
         checkpoint_edges=20000,
         backbone_graph_version=None,
@@ -62,7 +63,11 @@ class FrozenHIP(nn.Module):
         self.backbone.regress_config.forces = False
         self.backbone.regress_config.stress = False
         self.backbone.regress_config.hessian = False
-        self.head = Hessian_Head(self.backbone, num_layers_hessian=layers).to(device)
+        self.head = Hessian_Head(
+            self.backbone,
+            num_layers_hessian=layers,
+            width_multiplier=head_width_multiplier,
+        ).to(device)
         if head_experts:
             from fairchem.core.frozen_hip.mole import enable_head_mole
 
@@ -91,8 +96,11 @@ class FrozenHIP(nn.Module):
             torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
                 self.backbone_fp16_reduced_precision_reduction
             )
-            with torch.no_grad(), torch.autocast(
-                "cuda", dtype=torch.float16, enabled=precision == "fp16"
+            with (
+                torch.no_grad(),
+                torch.autocast(
+                    "cuda", dtype=torch.float16, enabled=precision == "fp16"
+                ),
             ):
                 emb = self.backbone(data)
         finally:

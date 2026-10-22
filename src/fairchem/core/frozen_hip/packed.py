@@ -561,7 +561,11 @@ class PackedHessianStream(IterableDataset):
             for window in windows:
                 references, sizes, cached = [], [], []
                 for source, (values, _) in enumerate(window):
-                    rows = np.flatnonzero(~validation_mask(values["omol_index"]))
+                    rows = (
+                        np.arange(len(values["natoms"]))
+                        if window[source][1].get("training_split") == "release-v2"
+                        else np.flatnonzero(~validation_mask(values["omol_index"]))
+                    )
                     rng.shuffle(rows)
                     references.extend((source, int(row)) for row in rows)
                     sizes.extend(int(values["natoms"][row]) for row in rows)

@@ -1109,3 +1109,48 @@ These graph timings exclude input copies and disk reads. They use a constant
 learning rate and one fixed physical batch per replay. Production integration
 needs a bounded shape cache, the changing learning rate, and gradient accumulation.
 The existing training defaults remain the measured baseline.
+
+### Wider-head sweep and the expanded geometry split
+
+`configs/frozen_hip/expanded_block_rmse_sweep.json` defines six matched runs.
+The frozen UMA-S-1.2 features enter a trainable, degree-wise SO(3) projection.
+The head doubles sphere, hidden, and radial hidden channels. The radial input
+basis and frozen embeddings stay unchanged. Compare one and two message blocks
+at learning rates 0.0003, 0.001, and 0.003. Each run uses ordinary Block RMSE,
+zero weight decay, no dropout, and four million optimizer updates.
+
+Keep the balanced atom sampler, 64-geometry cap, and 2,560-atom target.
+Split quadratic work above 196,608 atom pairs into gradient accumulation.
+The FP16 edge kernels retain FP32 parameters, gradients, normalization statistics,
+final projection, loss, and optimizer state. Retain the measured radial,
+rotation, scatter, and projected-readout optimizations.
+
+`--cuda-graphs` captures forward and backward for recurring packed batch shapes.
+The bounded cache defaults to two graphs and excludes large edge counts.
+Fresh coordinates, targets, features, and geometry pointers enter each replay.
+The ordinary optimizer applies the current learning rate and clips accumulated
+gradients once per logical batch. Uncached shapes use the compiled training path.
+Graphs do not change the logical batch size or introduce geometry padding.
+
+`tools/prepare_frozen_hip_release.py` stages a pinned published snapshot. It reuses
+existing packed targets and frozen features. It reads missing original rows and
+new training additions from the published upper-triangle shards. `--sparse-base`
+reads original source metadata and missing label spans through the hub file
+system. Downloads of new shards receive full SHA-256 checks. The tool validates
+teacher identity, units, row identities, partition membership, and finite values.
+It can resume completed preparation groups.
+
+Parent IDs belong to separate namespaces. Partition zero keeps its integer ID.
+Partition one adds `2**60`. Preparation checks uniqueness and zero overlap before
+publishing `READY.json`. Explicit release bundles include every selected training
+row; the former index-based one-percent holdout does not apply to them.
+
+The release targets 10,800,000 training and 200,000 held-out validation geometries.
+The pinned snapshot contains 10,353,639 published training labels and 90,934
+published validation labels. All six runs use that fixed training snapshot.
+Preparation selects one deterministic 10,000-label validation cohort. Every run
+uses this cohort every 400,000 steps. Final evaluation uses a separate manifest
+for all 200,000 validation IDs and loads the last checkpoint. An incomplete final
+label set produces `final_evaluation_pending.json`; it never produces a partial
+final score. The allocation chain stops after training if final labels remain
+missing. Complete the final manifest and use evaluation-only mode to finish.

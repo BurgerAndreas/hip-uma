@@ -99,6 +99,8 @@ args=(
     --data "$DATA_ROOT" --packed-data "$PACKED_ROOT" --output "$RUN_ROOT"
     --loss "$LOSS_NAME" --steps "$TARGET_STEPS" --duration "$SEGMENT_SECONDS"
     --weight-decay "${WEIGHT_DECAY:-0}"
+    --lr "${LEARNING_RATE:-0.001}" --layers "${HEAD_LAYERS:-1}"
+    --head-width-multiplier "${HEAD_WIDTH_MULTIPLIER:-1}"
     --max-batch "${GLOBAL_BATCH_CAP:-64}" --max-atoms "${GLOBAL_ATOM_TARGET:-2560}"
     --microbatch-pairs "${MICROBATCH_PAIRS:-524288}"
     --workers "${LOADER_WORKERS:-2}" --prefetch-factor "${PREFETCH_FACTOR:-8}" --window-shards 8
@@ -109,6 +111,10 @@ args=(
     --refresh-data-every 0
     --stop-file "$RUN_ROOT/STOP"
 )
+if [[ -n "${VALIDATION_MANIFEST:-}" ]]; then args+=(--validation-manifest "$VALIDATION_MANIFEST"); fi
+if [[ -n "${FINAL_VALIDATION_MANIFEST:-}" ]]; then args+=(--final-validation-manifest "$FINAL_VALIDATION_MANIFEST"); fi
+if [[ -n "${DATASET_REVISION:-}" ]]; then args+=(--dataset-revision "$DATASET_REVISION"); fi
+if [[ "${CUDA_GRAPHS:-0}" == 1 ]]; then args+=(--cuda-graphs --cuda-graph-cache "${CUDA_GRAPH_CACHE:-2}"); fi
 if [[ -n "${FEATURE_CACHE_ROOT:-}" ]]; then
     args+=(--feature-cache "$FEATURE_CACHE_ROOT" --feature-cache-read-only)
 fi
@@ -172,6 +178,11 @@ print(int(session["step"]))
 PY
 )
 if (( step >= TARGET_STEPS )); then
+    if [[ -s "$RUN_ROOT/final_evaluation_pending.json" ]]; then
+        cancel_successor
+        echo "Training complete; final evaluation awaits the full label set."
+        exit 0
+    fi
     test -s "$RUN_ROOT/final_evaluation.json"
     cancel_successor
     echo "Training and final evaluation complete at step $step."

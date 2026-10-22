@@ -1214,6 +1214,7 @@ class Hessian_Head(nn.Module, HeadInterface):
         fully_connected_hessian: bool = True,
         use_pbc_hessian: bool = False,
         radius_pbc_version_hessian: int | None = None,
+        width_multiplier: int = 1,
     ) -> None:
         super().__init__()
         if backbone.lmax < 2:
@@ -1232,16 +1233,29 @@ class Hessian_Head(nn.Module, HeadInterface):
             if radius_pbc_version_hessian is not None
             else backbone.radius_pbc_version
         )
+        if width_multiplier < 1:
+            raise ValueError("Head width multiplier must be positive")
+        self.width_multiplier = width_multiplier
+        channels = backbone.sphere_channels * width_multiplier
+        hidden = backbone.hidden_channels * width_multiplier
+        edge_channels = [backbone.edge_channels_list[0]] + [
+            c * width_multiplier for c in backbone.edge_channels_list[1:]
+        ]
+        self.input_projection = (
+            SO3_Linear(backbone.sphere_channels, channels, lmax=backbone.lmax)
+            if width_multiplier != 1
+            else nn.Identity()
+        )
         self.blocks = nn.ModuleList(
             [
                 eSCNMD_Block(
-                    backbone.sphere_channels,
-                    backbone.hidden_channels,
+                    channels,
+                    hidden,
                     backbone.lmax,
                     backbone.mmax,
                     backbone.mappingReduced,
                     backbone.SO3_grid,
-                    backbone.edge_channels_list,
+                    edge_channels,
                     self.cutoff_hessian,
                     backbone.norm_type,
                     backbone.act_type,
@@ -1255,14 +1269,14 @@ class Hessian_Head(nn.Module, HeadInterface):
         self.norm = get_normalization_layer(
             backbone.norm_type,
             lmax=backbone.lmax,
-            num_channels=backbone.sphere_channels,
+            num_channels=channels,
         )
         self.edge_readout = Edgewise(
-            sphere_channels=backbone.sphere_channels,
-            hidden_channels=backbone.hidden_channels,
+            sphere_channels=channels,
+            hidden_channels=hidden,
             lmax=backbone.lmax,
             mmax=backbone.mmax,
-            edge_channels_list=backbone.edge_channels_list,
+            edge_channels_list=edge_channels,
             mappingReduced=backbone.mappingReduced,
             SO3_grid=backbone.SO3_grid,
             cutoff=self.cutoff_hessian,
@@ -1270,8 +1284,8 @@ class Hessian_Head(nn.Module, HeadInterface):
             activation_checkpoint_chunk_size=None,
             backend=backbone.backend,
         )
-        self.node_projection = SO3_Linear(backbone.sphere_channels, 1, lmax=2)
-        self.edge_projection = SO3_Linear(backbone.sphere_channels, 1, lmax=2)
+        self.node_projection = SO3_Linear(channels, 1, lmax=2)
+        self.edge_projection = SO3_Linear(channels, 1, lmax=2)
         self.distance_expansion_hessian = GaussianSmearing(
             0.0,
             self.cutoff_hessian,
@@ -1370,7 +1384,7 @@ class Hessian_Head(nn.Module, HeadInterface):
                 batch_full=data.get("batch_full", data.batch),
                 edge_index=data.edge_index_hessian,
             )
-        node_embedding = emb["node_embedding"].clone()
+        node_embedding = self.input_projection(emb["node_embedding"].clone())
         for layer_idx, block in enumerate(self.blocks):
             with record_function(f"hessian message passing {layer_idx}"):
                 node_embedding = block(
