@@ -583,6 +583,7 @@ def main():
     metrics = torch.zeros(5, device=device, dtype=torch.float64)
     host_metrics = [0, 0, 0, 0]
     total_samples = 0
+    retry_batches = None
     model.train()
 
     profiler = None
@@ -1050,7 +1051,10 @@ def main():
             if should_stop:
                 break
             with phase("data_load"):
-                host_batches = next(train_iter)
+                host_batches = (
+                    next(train_iter) if retry_batches is None else retry_batches
+                )
+                retry_batches = None
             local_count = sum(len(data.natoms) for data in host_batches)
             count = local_count
             if world > 1:
@@ -1140,7 +1144,7 @@ def main():
                     update_counts[3] += 1
                 if args.diagnose_gradients:
                     batch_losses.append(loss.detach())
-                else:
+                if not (args.diagnose_gradients or args.dynamic_loss_scale):
                     host_batches[micro_index] = None
                 del prediction, loss, data, host_data
             warmup = min(1.0, (step + 1) / 500)
@@ -1196,6 +1200,10 @@ def main():
                             skipped_updates=skipped_updates,
                             loss_scale=old_scale,
                             next_loss_scale=old_scale * 0.5,
+                            retry_same_batch=True,
+                            sample_ids=[
+                                int(sid) for batch in host_batches for sid in batch.sid
+                            ],
                         )
                         print(json.dumps(event), flush=True)
                         if consecutive_overflows >= 16 or old_scale < 1e-6:
@@ -1203,6 +1211,7 @@ def main():
                                 "Repeated nonfinite gradients at reduced loss scale"
                             )
                         optimizer.zero_grad(set_to_none=True)
+                        retry_batches = host_batches
                         del host_batches
                         continue
                 elif args.async_grad_check:
