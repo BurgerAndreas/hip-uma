@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -29,6 +30,36 @@ from fairchem.core.frozen_hip.data import (
 
 DATA_REVISION = "7ce83e7425649619c9f85dad485bb2cfd7ee12bd"
 SELECTION = "parent-holdout-splitmix64-v1"
+
+
+def monitoring_complete(path, step, cohort):
+    """Recognize a complete fixed-cohort record after a checkpoint restart."""
+    from fairchem.core.frozen_hip.metrics import PROJECTED_METRIC_NAMES
+
+    path = Path(path)
+    if not path.exists():
+        return False
+    for line in path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+            if (
+                row.get("event") == "validation"
+                and row.get("step") == step
+                and row.get("samples") == cohort["samples"]
+                and row.get("sample_ids_sha256") == cohort["sample_ids_sha256"]
+                and all(
+                    math.isfinite(row.get(key, math.nan))
+                    for key in PROJECTED_METRIC_NAMES
+                )
+                and row.get("mass_weighted_eckart_samples", 0)
+                + row.get("mass_weighted_eckart_samples_without_modes", 0)
+                == cohort["samples"]
+            ):
+                return True
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            # A terminated writer can leave an incomplete trailing record.
+            continue
+    return False
 
 
 def evaluation_mask(indices):

@@ -165,3 +165,33 @@ def test_dense_validation_cache_preserves_samples_labels_and_geometry(tmp_path):
     manifest["entries"][0]["source_sha256"] = "changed"
     with pytest.raises(ValueError, match="cache differs"):
         next(iter(EvaluationStream(tmp_path, manifest)))
+
+
+def test_monitoring_resume_requires_the_complete_exact_cohort(tmp_path):
+    from fairchem.core.frozen_hip.metrics import PROJECTED_METRIC_NAMES
+    from fairchem.core.frozen_hip.validation import monitoring_complete
+
+    path = tmp_path / "evaluation.jsonl"
+    cohort = dict(samples=10, sample_ids_sha256="a" * 64)
+    assert not monitoring_complete(path, 400000, cohort)
+    row = dict(
+        event="validation",
+        step=400000,
+        samples=10,
+        sample_ids_sha256=cohort["sample_ids_sha256"],
+        mass_weighted_eckart_samples=9,
+        mass_weighted_eckart_samples_without_modes=1,
+    )
+    row.update(dict.fromkeys(PROJECTED_METRIC_NAMES, 0.1))
+    path.write_text(json.dumps(row) + '\n{"event":')
+    assert monitoring_complete(path, 400000, cohort)
+    assert not monitoring_complete(path, 800000, cohort)
+    assert not monitoring_complete(
+        path, 400000, {**cohort, "sample_ids_sha256": "b" * 64}
+    )
+    assert not monitoring_complete(path, 400000, {**cohort, "samples": 11})
+    del row[PROJECTED_METRIC_NAMES[-1]]
+    path.write_text(json.dumps(row) + "\n")
+    assert not monitoring_complete(path, 400000, cohort)
+    path.write_text('{"event":')
+    assert not monitoring_complete(path, 400000, cohort)

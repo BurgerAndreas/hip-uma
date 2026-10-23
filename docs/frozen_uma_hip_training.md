@@ -1246,3 +1246,13 @@ numerical comparisons. Report mass-weighted, Eckart-projected metrics as well
 as Hessian and parameter-gradient errors. A short numerical diagnostic cannot
 establish convergence equivalence. Test maximum molecule sizes with populated
 CUDA graph caches before increasing the physical microbatch limit.
+
+Capture and warmup retain the current nondefault training stream. This avoids
+cross-stream reuse of compiled backward metadata during later eager updates.
+Default-stream callers use an explicit side stream. Stress checks alternate
+captured batches and 350-atom eager batches with all head parameters trainable.
+
+A resumed checkpoint can precede an interrupted validation. At a scheduled
+validation step, training checks for a complete record from the exact fixed
+cohort. It repeats missing validation before it advances the optimizer. A
+complete matching record prevents duplicate evaluation.

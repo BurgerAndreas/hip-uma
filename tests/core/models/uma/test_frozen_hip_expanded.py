@@ -222,3 +222,31 @@ def test_graph_replays_changed_molecular_partitions():
     ).sqrt()
     assert relative.item() < 0.01
     assert runner.captures == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_graph_capture_retains_the_nondefault_training_stream():
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    observed = []
+    with torch.cuda.stream(stream):
+        model = torch.nn.Linear(3, 2).cuda()
+
+        def loss(data):
+            observed.append(torch.cuda.current_stream().cuda_stream)
+            return model(data.hip_features).square().mean()
+
+        runner = TrainingGraphs(model.parameters(), loss, capacity=1)
+        for _ in range(5):
+            model.zero_grad(set_to_none=True)
+            data = atomicdata_list_to_batch(
+                [_sample("H2", [[0, 0, 0], [0, 0, 0.8]])]
+            ).cuda()
+            data.hip_sizes = [2]
+            data.hip_features = torch.randn(2, 3, device="cuda")
+            value = runner.backward(data, 1024)
+            if value is None:
+                (loss(data) * 1024).backward()
+        assert runner.captures == 1
+        assert set(observed) == {stream.cuda_stream}
+    torch.cuda.current_stream().wait_stream(stream)

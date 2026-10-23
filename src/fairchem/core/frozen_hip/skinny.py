@@ -99,6 +99,12 @@ def _reduce_weight_gradient(
     tl.store(DW + channel, tl.sum(total, axis=0), channel < D)
 
 
+def _projection_rows(m, k, n):
+    if m < 16384 or k > 2048:
+        return 2
+    return 8 if n == 4 else 4
+
+
 @triton_op("fairchem::hip_skinny_forward", mutates_args={})
 def skinny_forward(
     x: torch.Tensor,
@@ -108,7 +114,8 @@ def skinny_forward(
     m, k = x.shape
     n = w.shape[0]
     out = torch.empty((m, n), device=x.device, dtype=torch.float32)
-    wrap_triton(_forward)[(triton.cdiv(m, 2),)](
+    rows = _projection_rows(m, k, n)
+    wrap_triton(_forward)[(triton.cdiv(m, rows),)](
         x,
         w,
         bias if bias is not None else w,
@@ -118,7 +125,7 @@ def skinny_forward(
         n,
         k,
         n,
-        2,
+        rows,
         triton.next_power_of_2(k),
         bias is not None,
         num_warps=4,
@@ -156,7 +163,8 @@ def skinny_backward(
             num_warps=4,
         )
     if need_w:
-        splits = triton.cdiv(m, 128)
+        rows = 256 if m >= 16384 else 128
+        splits = triton.cdiv(m, rows)
         partial = torch.empty((splits, n, k), device=x.device, dtype=torch.float32)
         wrap_triton(_weight_gradient)[(triton.cdiv(k, 32), splits)](
             x,
@@ -167,7 +175,7 @@ def skinny_backward(
             gradient.stride(0),
             k,
             n,
-            128,
+            rows,
             32,
             num_warps=4,
         )
@@ -199,7 +207,8 @@ def skinny_project_forward(
         n, k = w.shape
         x, y = flat[:, x_start : x_start + k], out[:, y_start : y_start + n]
         b = bias if y_start == 0 else None
-        wrap_triton(_forward)[(triton.cdiv(m, 2),)](
+        rows = _projection_rows(m, k, n)
+        wrap_triton(_forward)[(triton.cdiv(m, rows),)](
             x,
             w,
             b if b is not None else w,
@@ -209,7 +218,7 @@ def skinny_project_forward(
             9,
             k,
             n,
-            2,
+            rows,
             triton.next_power_of_2(k),
             b is not None,
             num_warps=4,
@@ -260,7 +269,8 @@ def skinny_project_backward(
             )
         dw = torch.empty_like(w) if need_w else w.new_empty(0)
         if need_w:
-            splits = triton.cdiv(m, 128)
+            rows = 256 if m >= 16384 else 128
+            splits = triton.cdiv(m, rows)
             partial = torch.empty((splits, n, k), device=x.device, dtype=torch.float32)
             wrap_triton(_weight_gradient)[(triton.cdiv(k, 32), splits)](
                 x,
@@ -271,7 +281,7 @@ def skinny_project_backward(
                 9,
                 k,
                 n,
-                128,
+                rows,
                 32,
                 num_warps=4,
             )

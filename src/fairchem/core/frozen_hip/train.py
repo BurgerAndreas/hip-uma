@@ -40,6 +40,7 @@ from fairchem.core.frozen_hip.validation import (
     EvaluationStream,
     load_last_head,
     load_manifest,
+    monitoring_complete,
     sample_fingerprint,
 )
 
@@ -941,6 +942,24 @@ def main():
         )
         print(json.dumps({"event": "training_start", **public_config}), flush=True)
     try:
+        if (
+            not args.eval_only
+            and not args.benchmark
+            and not stopping
+            and step > 0
+            and step % args.validate_every == 0
+            and (step < args.steps or args.final_validation_manifest is not None)
+        ):
+            recorded = [
+                monitoring_complete(args.output / "evaluation.jsonl", step, cohort)
+                if rank == 0
+                else None
+            ]
+            if world > 1:
+                dist.broadcast_object_list(recorded, src=0, device=device)
+            if not recorded[0]:
+                evaluate()
+                window = time.monotonic()
         while not args.eval_only and step < args.steps:
             if time.monotonic() - started >= args.duration:
                 stopping = True

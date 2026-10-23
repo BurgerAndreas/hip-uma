@@ -8,7 +8,15 @@ import torch
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
-    "shape", [(17, 33, 3), (513, 257, 4), (4097, 1536, 3), (703, 1024, 2)]
+    "shape",
+    [
+        (17, 33, 3),
+        (513, 257, 4),
+        (4097, 1536, 3),
+        (703, 1024, 2),
+        (17011, 1536, 3),
+        (17011, 2048, 4),
+    ],
 )
 @pytest.mark.parametrize("gradient_scale", [1.0, 1e-5, 1000.0])
 def test_skinny_projection_matches_double(shape, gradient_scale):

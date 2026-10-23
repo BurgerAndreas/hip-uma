@@ -71,8 +71,17 @@ class TrainingGraphs:
             with CUDA_CAPTURE_LOCK:
                 static = data.clone()
                 original = [p.grad for p in self.parameters]
-                stream = torch.cuda.Stream()
-                stream.wait_stream(torch.cuda.current_stream())
+                current = torch.cuda.current_stream()
+                # Keep compiled backward nodes on their original training
+                # stream. Moving capture to a side stream can race later
+                # eager updates when compiled blocks share autograd metadata.
+                stream = (
+                    torch.cuda.Stream()
+                    if current == torch.cuda.default_stream()
+                    else current
+                )
+                if stream != current:
+                    stream.wait_stream(current)
                 try:
                     with torch.cuda.stream(stream):
                         # Finish lazy compilation before capture. Allocate gradient
@@ -86,7 +95,7 @@ class TrainingGraphs:
                     for p in self.parameters:
                         p.grad = None
                     graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph):
+                    with torch.cuda.graph(graph, stream=stream):
                         value = self.loss(static)
                         (value * self.loss_scale).backward()
                     private = [
