@@ -48,6 +48,10 @@ def test_skinny_projection_matches_double(shape, gradient_scale, dtype):
         # lie on different sides of a subnormal rounding boundary after FP32
         # accumulation. Parameter gradients must meet the tighter FP32 limit.
         atol = max(6e-8, 2e-7 * gradient_scale) if index == 0 else 0.003
+        if index > 0 and dtype == torch.float32:
+            # FP32 products also round before the long reduction. Near-zero
+            # entries can cancel large terms; keep the relative norm test below.
+            atol = max(atol, 2e-7 * gradient_scale * m**0.5)
         torch.testing.assert_close(a, expected_gradient, atol=atol, rtol=0.002)
         relative = (
             a.float() - expected_gradient.float()
