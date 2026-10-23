@@ -1306,12 +1306,15 @@ including custom Triton kernels and scaled FP16 matrix operands.
 Logical batches, sample inclusion, and weighted gradient accumulation stay unchanged.
 Scaled linear backward unpacks saved tensors once, as checkpoint recomputation
 requires. The regression suite covers this recovery path.
+The bounded path passed 71 CPU/CUDA test cases and the captured wide-batch replay.
+All three architecture stress tests passed 100 large updates and 50 small updates
+without a rejected update. Peak allocated memory ranged from 55.3 to 56.3 GB.
 
 Scaling also protects small gradients. On the saved conditioned batch, scale 1
 changed the gradient norm by 19.5% against FP32. Scale 1,024 changed it by 0.06%.
 Reducing the fixed scale therefore did not provide an adequate solution.
 
-The corrected source passed 101 CPU tests and 51 GPU test cases. The CPU suite
+The initial second-convolution fix passed 101 CPU tests and 51 GPU test cases. The CPU suite
 skipped 33 GPU cases. Maximum-size stress tests passed 100 large updates and
 50 smaller updates for each architecture. They used four 350-atom geometries
 for one block and three for two blocks. Peak allocation stayed below 47.5 GB.
