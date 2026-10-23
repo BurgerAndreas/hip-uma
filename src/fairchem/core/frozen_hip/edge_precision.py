@@ -74,13 +74,17 @@ def half_linear(x, w, b=None, *, out32=False):
 
 
 def linear_forward(self, x):
-    return half_linear(x, self.weight, self.bias)
+    return half_linear(
+        x, self.weight, self.bias, out32=getattr(self, "hip_fp32_output", False)
+    )
 
 
 def so2_forward(self, x):
     real, imag = self.fc.weight.split(self.out_channels_half, 0)
     weight = torch.cat((torch.cat((real, -imag), 1), torch.cat((imag, real), 1)), 0)
-    out = half_linear(x.flatten(1), weight)
+    out = half_linear(
+        x.flatten(1), weight, out32=getattr(self, "hip_fp32_output", False)
+    )
     return out.reshape(x.shape[0], 2, -1, self.m_output_channels).unbind(1)
 
 
@@ -232,7 +236,11 @@ def mixed_scatter(
             edges, ptr, e, nodes, offset, 32, num_warps=1
         )
         out = torch.empty((nodes, 9, c), device=x.device, dtype=torch.float32)
-        tile = min(triton.next_power_of_2(c), 256) if tuned and e >= 16384 and c >= 128 else 32
+        tile = (
+            min(triton.next_power_of_2(c), 256)
+            if tuned and e >= 16384 and c >= 128
+            else 32
+        )
         edge_tile = 4 if tile >= 128 else 32
         wrap_triton(_segment_rotate)[(nodes * 9, triton.cdiv(c, tile))](
             x, w, ptr, out, c, tile, edge_tile, num_warps=4
@@ -266,10 +274,19 @@ def mixed_gather(
     edges: torch.Tensor,
     offset: int,
     tuned: bool = False,
+    output_fp32: bool = False,
 ) -> torch.Tensor:
     e, c = edges.shape[1], g.shape[-1]
-    out = torch.empty((e, 9, c), device=g.device, dtype=torch.float16)
-    tile = min(triton.next_power_of_2(c), 256) if tuned and e >= 16384 and c >= 128 else BLOCK_C
+    out = torch.empty(
+        (e, 9, c),
+        device=g.device,
+        dtype=torch.float32 if output_fp32 else torch.float16,
+    )
+    tile = (
+        min(triton.next_power_of_2(c), 256)
+        if tuned and e >= 16384 and c >= 128
+        else BLOCK_C
+    )
     wrap_triton(permute_wigner_inv_edge_to_node_bwd_dx_kernel)[
         (min(max(e, 1), GRID_E_STRIDE), triton.cdiv(c, tile))
     ](
@@ -294,13 +311,16 @@ class MixedScatter(torch.autograd.Function):
         ctx.save_for_backward(w, edges)
         ctx.offset = offset
         ctx.tuned = tuned
+        ctx.output_fp32 = x.dtype == torch.float32
         return mixed_scatter(x.contiguous(), w, edges, nodes, offset, segmented, tuned)
 
     @staticmethod
     def backward(ctx, g):
         w, edges = ctx.saved_tensors
         return (
-            mixed_gather(g.contiguous(), w, edges, ctx.offset, ctx.tuned),
+            mixed_gather(
+                g.contiguous(), w, edges, ctx.offset, ctx.tuned, ctx.output_fp32
+            ),
             None,
             None,
             None,
@@ -364,6 +384,12 @@ def enable_edge_precision(head, enabled=True):
                     module.forward = MethodType(norm_forward, module)
                 else:
                     module.forward = MethodType(so2_forward, module)
+        # The second convolution can exceed the FP16 output range before the
+        # node reduction and normalization. Keep its tensor-core products and
+        # outputs in FP32; loss scaling only protects the backward pass.
+        for module in block.so2_conv_2.modules():
+            if isinstance(module, (torch.nn.Linear, SO2_m_Conv)):
+                module.hip_fp32_output = enabled
         block.so2_conv_1.edge_mixed_precision = enabled
         block.so2_conv_2.edge_mixed_precision = enabled
     for module in head.modules():

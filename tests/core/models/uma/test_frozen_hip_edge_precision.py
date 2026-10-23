@@ -161,3 +161,22 @@ def test_edge_precision_preserves_head_state_and_cartesian_output():
     torch.manual_seed(19)
     restored = head(data, emb)["hessian"]
     torch.testing.assert_close(restored, expected, rtol=2e-4, atol=2e-5)
+
+
+def test_second_convolution_preserves_large_finite_outputs():
+    from fairchem.core.frozen_hip.edge_precision import linear_forward
+
+    layer = torch.nn.Linear(16, 4, bias=False).cuda()
+    with torch.no_grad():
+        layer.weight.fill_(4)
+    layer.hip_fp32_output = True
+    x = torch.full(
+        (8, 16), 2048.0, device="cuda", dtype=torch.float16, requires_grad=True
+    )
+    y = linear_forward(layer, x)
+    assert y.dtype == torch.float32
+    assert y.min() > torch.finfo(torch.float16).max
+    torch.testing.assert_close(y, torch.nn.functional.linear(x.float(), layer.weight))
+    y.mean().backward()
+    assert torch.isfinite(x.grad).all()
+    assert torch.isfinite(layer.weight.grad).all()
