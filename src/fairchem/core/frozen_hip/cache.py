@@ -41,7 +41,7 @@ def feature_namespace(
     )
 
 
-def cached_features(root, key, source_sha256):
+def cached_features(root, key, source_sha256, *, allow_fp16=False):
     """Open only complete feature arrays tied to the source content hash."""
     path = Path(root) / f"{key}.npy"
     marker = path.with_suffix(".json")
@@ -51,7 +51,13 @@ def cached_features(root, key, source_sha256):
     if meta["source_sha256"] != source_sha256:
         raise ValueError("Cached features refer to different scientific data")
     values = np.load(path, mmap_mode="r")
-    if list(values.shape) != meta["shape"] or values.dtype != np.float32:
+    storage_dtype = meta.get("storage_dtype", "float32")
+    allowed = ("float32", "float16") if allow_fp16 else ("float32",)
+    if (
+        list(values.shape) != meta["shape"]
+        or storage_dtype not in allowed
+        or str(values.dtype) != storage_dtype
+    ):
         raise ValueError("Frozen feature cache shape or dtype differs")
     if not meta.get("finite", False) and not np.isfinite(values).all():
         raise ValueError("Frozen feature cache contains nonfinite values")

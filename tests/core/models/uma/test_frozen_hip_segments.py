@@ -94,7 +94,12 @@ Path(os.environ["RUN_ROOT"], "cancelled.json").write_text(json.dumps(sys.argv[1:
     executable(
         "flock", 'import os, sys\nsys.exit(int(os.environ.get("LOCK_FAIL", "0")))\n'
     )
-    executable("timeout", "import os, sys\nos.execvp(sys.argv[2], sys.argv[2:])\n")
+    executable(
+        "timeout",
+        "import os, sys\nargs=sys.argv[1:]\n"
+        "if args[0]=='-k': args=args[2:]\n"
+        "os.execvp(args[1], args[1:])\n",
+    )
     env = {
         **os.environ,
         "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
@@ -367,3 +372,27 @@ def test_expanded_sweep_settings_reach_the_trainer(allocation):
     ]:
         assert args[args.index(flag) + 1] == value
     assert "--cuda-graphs" in args
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_execution_options_survive_continuation(allocation, enabled):
+    run, env = allocation
+    switches = {
+        "SKINNY_READOUT": "--skinny-readout",
+        "TUNED_EDGE_KERNELS": "--tuned-edge-kernels",
+        "ALLOW_FP16_CACHE": "--allow-fp16-cache",
+        "PACK_FEATURES_FP16": "--pack-features-fp16",
+    }
+    result = invoke(
+        {
+            **env,
+            **dict.fromkeys(switches, "1" if enabled else "0"),
+            "COMPILE_MODE": "max-autotune-no-cudagraphs",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    args = json.loads((run / "arguments.json").read_text())
+    for flag in switches.values():
+        assert (flag in args) == enabled
+    assert args[args.index("--compile-mode") + 1] == "max-autotune-no-cudagraphs"
+    assert "--export=ALL" in read_lines(run / "submissions.jsonl")[0]["args"]

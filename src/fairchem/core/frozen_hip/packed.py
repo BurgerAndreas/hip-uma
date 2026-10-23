@@ -159,7 +159,7 @@ def make_packed_batch(
     return data
 
 
-def pack_cached_window(window, references, *, include_targets=True):
+def pack_cached_window(window, references, *, include_targets=True, feature_dtype=None):
     """Gather cached rows once, retaining the original bundle grouping order."""
     grouped = {}
     for source, row in references:
@@ -168,7 +168,10 @@ def pack_cached_window(window, references, *, include_targets=True):
         "features" not in window[source][0] or "_cache_meta" in window[source][1]
         for source in grouped
     ):
-        return pack_packed_window(window, references, include_targets=include_targets)
+        data = pack_packed_window(window, references, include_targets=include_targets)
+        if feature_dtype == np.float16 and hasattr(data, "hip_features"):
+            data.hip_features = data.hip_features.half()
+        return data
     sizes, positions, cells, numbers, features = [], [], [], [], []
     pairs, diagonals, asymmetry, charge, spin, sid, scales = [], [], [], [], [], [], []
     for source, rows in grouped.items():
@@ -215,7 +218,7 @@ def pack_cached_window(window, references, *, include_targets=True):
     data.hip_edge_ptr = torch.from_numpy(np.r_[0, np.cumsum(sizes * (sizes - 1))])
     data.hip_pair_ptr = data.hip_edge_ptr * 9 // 2
     data.hip_fused_graph = True
-    data.hip_features = torch.from_numpy(np.concatenate(features))
+    data.hip_features = torch.from_numpy(np.concatenate(features, dtype=feature_dtype))
     data.hip_feature_scale = (
         scales[0]
         if len(set(scales)) == 1
@@ -434,6 +437,8 @@ class PackedHessianStream(IterableDataset):
         tf32=True,
         grouped_mole=False,
         feature_cache=None,
+        allow_fp16_cache=False,
+        pack_features_fp16=False,
         window_files=8,
         max_passes=None,
         rank=0,
@@ -457,6 +462,8 @@ class PackedHessianStream(IterableDataset):
         self.backbone_graph_version = backbone_graph_version
         self.fused_backbone = fused_backbone
         self.feature_cache = feature_cache
+        self.allow_fp16_cache = allow_fp16_cache
+        self.pack_features_fp16 = pack_features_fp16
         self.logical_pair_budget = logical_pair_budget
         self.include_targets = include_targets
         self.include_cache_metadata = include_cache_metadata
@@ -514,7 +521,12 @@ class PackedHessianStream(IterableDataset):
                 source_sha = digest.hexdigest()
                 key = "bundles/" + path.stem
                 if "features" not in values:
-                    features = cached_features(self.feature_cache, key, source_sha)
+                    features = cached_features(
+                        self.feature_cache,
+                        key,
+                        source_sha,
+                        allow_fp16=self.allow_fp16_cache,
+                    )
                     if features is not None:
                         values = {**values, "features": features}
                         header["feature_scale"] = 1.0
@@ -528,6 +540,14 @@ class PackedHessianStream(IterableDataset):
                         ).tolist(),
                         hip_data_sha256=source_sha,
                     )
+            if (
+                self.pack_features_fp16
+                and "features" in values
+                and values["features"].dtype == np.float32
+            ):
+                maximum = np.max(np.abs(values["features"]), initial=0)
+                if not np.isfinite(maximum) or maximum > np.finfo(np.float16).max:
+                    raise ValueError("Cached features exceed finite FP16 packing range")
             if self.window_memory_bytes:
                 values, used = stage_packed_arrays(
                     values,
@@ -580,16 +600,20 @@ class PackedHessianStream(IterableDataset):
                     )
                 )
                 rng.shuffle(batches)
+                operation = (
+                    pack_cached_window if self.fast_packing else pack_packed_window
+                )
+                packing = {"include_targets": self.include_targets}
+                if self.fast_packing:
+                    packing["feature_dtype"] = (
+                        np.float16 if self.pack_features_fp16 else None
+                    )
                 for batch in batches:
                     yield [
-                        (
-                            pack_cached_window
-                            if self.fast_packing
-                            else pack_packed_window
-                        )(
+                        operation(
                             window,
                             [references[i] for i in indices],
-                            include_targets=self.include_targets,
+                            **packing,
                         )
                         for indices in microbatch_indices(
                             batch, sizes, self.pair_budget

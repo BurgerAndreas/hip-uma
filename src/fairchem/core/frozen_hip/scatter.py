@@ -76,7 +76,7 @@ def _segment_rotate(
     width = tl.where(coefficient == 0, 1, tl.where(coefficient < 4, 3, 5))
     total = tl.zeros((BE, BC), tl.float32)
     while edge < end:
-        e = edge + row
+        e = (edge + row).to(tl.int64)
         mask = (e[:, None] < end) & (channel[None, :] < C)
         value = tl.zeros((BE, BC), tl.float32)
         for j in tl.static_range(5):

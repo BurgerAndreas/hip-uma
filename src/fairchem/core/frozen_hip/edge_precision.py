@@ -17,6 +17,7 @@ from torch.library import triton_op, wrap_triton
 
 from fairchem.core.frozen_hip.linear import half_mm_float_output
 from fairchem.core.frozen_hip.radial import (
+    _KERNEL_CONFIG,
     _backward_node,
     _backward_radial,
     _forward,
@@ -89,8 +90,9 @@ def mixed_radial(
 ) -> torch.Tensor:
     e, c = edges.shape[1], x.shape[-1]
     out = torch.empty((e, 9, 2 * c), device=x.device, dtype=torch.float16)
-    wrap_triton(_forward)[(min(max(e, 1), 8192), triton.cdiv(2 * c, 64))](
-        x, w, edges, r, out, e, c, 64, 8192, num_warps=2
+    tile = _KERNEL_CONFIG["channel_tile"]
+    wrap_triton(_forward)[(min(max(e, 1), 8192), triton.cdiv(2 * c, tile))](
+        x, w, edges, r, out, e, c, tile, 8192, num_warps=min(4, tile // 32)
     )
     return out
 
@@ -103,37 +105,52 @@ def mixed_radial_grad(
     r: torch.Tensor,
     g: torch.Tensor,
     need_x: bool,
+    tuned: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     e, c = edges.shape[1], x.shape[-1]
     dr = torch.empty_like(r)
-    dx = torch.zeros_like(x) if need_x else x.new_empty(0)
-    grid = (min(max(e, 1), 8192), triton.cdiv(2 * c, 64))
-    wrap_triton(_backward_radial)[grid](x, w, edges, g, dr, e, c, 64, 8192, num_warps=2)
+    segmented = tuned and e >= 32768 and c >= 128
+    dx = torch.zeros_like(x) if need_x and not segmented else x.new_empty(0)
+    tile = _KERNEL_CONFIG["channel_tile"]
+    warps = min(4, tile // 32)
+    grid = (min(max(e, 1), 8192), triton.cdiv(2 * c, tile))
+    wrap_triton(_backward_radial)[grid](
+        x, w, edges, g, dr, e, c, tile, 8192, num_warps=warps
+    )
     if need_x:
-        wrap_triton(_backward_node)[grid](
-            w, edges, r, g, dx, e, c, 64, 8192, num_warps=2
-        )
+        if segmented:
+            from fairchem.core.frozen_hip.radial_segmented import segmented_radial_dx
+
+            bc, be = (256, 4) if c >= 256 else (128, 8)
+            dx = segmented_radial_dx(w, edges, r, g, x.shape[0], bc, be)
+        else:
+            wrap_triton(_backward_node)[grid](
+                w, edges, r, g, dx, e, c, tile, 8192, num_warps=warps
+            )
     return dx, dr
 
 
 class MixedRadial(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, edges, w, r):
+    def forward(ctx, x, edges, w, r, tuned):
         ctx.save_for_backward(x, edges, w, r)
+        ctx.tuned = tuned
         return mixed_radial(x, w, edges, r)
 
     @staticmethod
     def backward(ctx, g):
         x, edges, w, r = ctx.saved_tensors
         dx, dr = mixed_radial_grad(
-            x, w, edges, r, g.contiguous(), ctx.needs_input_grad[0]
+            x, w, edges, r, g.contiguous(), ctx.needs_input_grad[0], ctx.tuned
         )
-        return dx if ctx.needs_input_grad[0] else None, None, None, dr
+        return dx if ctx.needs_input_grad[0] else None, None, None, dr, None
 
 
 def radial_convolution(conv, x, edges, w, edge_features):
     r = conv.rad_func(edge_features)
-    messages = MixedRadial.apply(x, edges, w, r)
+    messages = MixedRadial.apply(
+        x, edges, w, r, getattr(conv, "hip_tuned_edge_kernels", False)
+    )
     parts = messages.split(conv.m_split_sizes, 1)
     e = messages.shape[0]
     c = conv.m_output_channels
@@ -147,6 +164,18 @@ def radial_convolution(conv, x, edges, w, edge_features):
 
 
 def project_convolution(conv, projection, messages):
+    from fairchem.core.frozen_hip.skinny import skinny_linear, skinny_project
+
+    use_skinny = (
+        getattr(conv, "hip_skinny_readout", False) and messages.shape[0] >= 16384
+    )
+    combined = use_skinny and getattr(conv, "hip_combined_skinny_readout", False)
+
+    def project(x, weight, bias=None):
+        if use_skinny:
+            return skinny_linear(x, weight, bias)
+        return torch.nn.functional.linear(x.float(), weight, bias)
+
     channels = conv.m_output_channels
     degrees = conv.lmax + 1
     p = projection.weight[:, 0, :]
@@ -161,22 +190,29 @@ def project_convolution(conv, projection, messages):
     )
     parts = messages.split(conv.m_split_sizes, 1)
     e = messages.shape[0]
-    out = [
-        torch.nn.functional.linear(parts[0].flatten(1).float(), weight, bias).unsqueeze(
-            -1
-        )
-    ]
+    weights = [weight]
+    out = [] if combined else [project(parts[0].flatten(1), weight, bias).unsqueeze(-1)]
     for m, block in enumerate(conv.so2_m_conv, 1):
         count = degrees - m
         original = block.fc.weight.reshape(2, count, channels, -1)
         effective = torch.einsum("lc,slci->sli", p[m:], original)
         real, imag = effective.unbind(0)
         weight = torch.cat((torch.cat((real, -imag), 1), torch.cat((imag, real), 1)), 0)
-        value = torch.nn.functional.linear(parts[m].flatten(1).float(), weight).reshape(
-            e, 2, count, 1
-        )
-        out.extend(value.unbind(1))
+        weights.append(weight)
+        if not combined:
+            value = project(parts[m].flatten(1), weight).reshape(e, 2, count, 1)
+            out.extend(value.unbind(1))
+    if combined:
+        return skinny_project(messages, weights, bias)
     return torch.cat(out, 1)
+
+
+def enable_skinny_readout(head, enabled=True, *, combined=True):
+    """Avoid wide FP32 casts in the final projection of large FP16 edge batches."""
+    if enabled and not getattr(head, "edge_mixed_precision", False):
+        raise ValueError("Skinny readout requires FP16 edge precision")
+    head.edge_readout.so2_conv_2.hip_skinny_readout = enabled
+    head.edge_readout.so2_conv_2.hip_combined_skinny_readout = combined
 
 
 @triton_op("fairchem::hip_edge_mixed_scatter", mutates_args={})
@@ -187,6 +223,7 @@ def mixed_scatter(
     nodes: int,
     offset: int,
     segmented: bool,
+    tuned: bool = False,
 ) -> torch.Tensor:
     e, c = edges.shape[1], x.shape[-1]
     if segmented:
@@ -195,8 +232,10 @@ def mixed_scatter(
             edges, ptr, e, nodes, offset, 32, num_warps=1
         )
         out = torch.empty((nodes, 9, c), device=x.device, dtype=torch.float32)
-        wrap_triton(_segment_rotate)[(nodes * 9, triton.cdiv(c, 32))](
-            x, w, ptr, out, c, 32, 32, num_warps=4
+        tile = min(triton.next_power_of_2(c), 256) if tuned and e >= 16384 and c >= 128 else 32
+        edge_tile = 4 if tile >= 128 else 32
+        wrap_triton(_segment_rotate)[(nodes * 9, triton.cdiv(c, tile))](
+            x, w, ptr, out, c, tile, edge_tile, num_warps=4
         )
     else:
         out = torch.zeros((nodes, 9, c), device=x.device, dtype=torch.float32)
@@ -222,28 +261,47 @@ def mixed_scatter(
 
 @triton_op("fairchem::hip_edge_mixed_gather", mutates_args={})
 def mixed_gather(
-    g: torch.Tensor, w: torch.Tensor, edges: torch.Tensor, offset: int
+    g: torch.Tensor,
+    w: torch.Tensor,
+    edges: torch.Tensor,
+    offset: int,
+    tuned: bool = False,
 ) -> torch.Tensor:
     e, c = edges.shape[1], g.shape[-1]
     out = torch.empty((e, 9, c), device=g.device, dtype=torch.float16)
+    tile = min(triton.next_power_of_2(c), 256) if tuned and e >= 16384 and c >= 128 else BLOCK_C
     wrap_triton(permute_wigner_inv_edge_to_node_bwd_dx_kernel)[
-        (min(max(e, 1), GRID_E_STRIDE), triton.cdiv(c, BLOCK_C))
-    ](g, w, out, e, c, BLOCK_C, GRID_E_STRIDE, edges, True, offset, num_warps=1)
+        (min(max(e, 1), GRID_E_STRIDE), triton.cdiv(c, tile))
+    ](
+        g,
+        w,
+        out,
+        e,
+        c,
+        tile,
+        GRID_E_STRIDE,
+        edges,
+        True,
+        offset,
+        num_warps=4 if tile >= 128 else 1,
+    )
     return out
 
 
 class MixedScatter(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, w, edges, nodes, offset, segmented):
+    def forward(ctx, x, w, edges, nodes, offset, segmented, tuned):
         ctx.save_for_backward(w, edges)
         ctx.offset = offset
-        return mixed_scatter(x.contiguous(), w, edges, nodes, offset, segmented)
+        ctx.tuned = tuned
+        return mixed_scatter(x.contiguous(), w, edges, nodes, offset, segmented, tuned)
 
     @staticmethod
     def backward(ctx, g):
         w, edges = ctx.saved_tensors
         return (
-            mixed_gather(g.contiguous(), w, edges, ctx.offset),
+            mixed_gather(g.contiguous(), w, edges, ctx.offset, ctx.tuned),
+            None,
             None,
             None,
             None,
@@ -253,11 +311,27 @@ class MixedScatter(torch.autograd.Function):
 
 
 class MixedBackend(FusedRotationBackend):
-    def __init__(self, segmented):
+    def __init__(self, segmented, tuned=False):
         self.segmented = segmented
+        self.tuned = tuned
 
     def permute_wigner_inv_edge_to_node(self, x, w, edges, nodes, node_offset=0):
-        return MixedScatter.apply(x, w, edges, nodes, node_offset, self.segmented)
+        return MixedScatter.apply(
+            x, w, edges, nodes, node_offset, self.segmented, self.tuned
+        )
+
+
+def enable_tuned_edge_kernels(head, enabled=True):
+    """Tune wide complete-graph reductions while retaining FP32 accumulation."""
+    if enabled and not getattr(head, "edge_mixed_precision", False):
+        raise ValueError("Tuned edge kernels require FP16 edge precision")
+    for block in [block.edge_wise for block in head.blocks] + [head.edge_readout]:
+        block.so2_conv_1.hip_tuned_edge_kernels = enabled
+    backend = MixedBackend(True, tuned=enabled)
+    for module in head.modules():
+        if isinstance(getattr(module, "backend", None), MixedBackend):
+            module.backend = backend
+    head.tuned_edge_kernels = enabled
 
 
 def norm_forward(self, x):

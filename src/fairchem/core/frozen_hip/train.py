@@ -137,6 +137,15 @@ def parse_args():
     p.add_argument("--fused-wigner", action="store_true")
     p.add_argument("--fused-radial", action="store_true")
     p.add_argument("--radial-tile", type=int, choices=(64, 128, 256), default=64)
+    p.add_argument("--skinny-readout", action="store_true")
+    p.add_argument("--tuned-edge-kernels", action="store_true")
+    p.add_argument("--allow-fp16-cache", action="store_true")
+    p.add_argument("--pack-features-fp16", action="store_true")
+    p.add_argument(
+        "--compile-mode",
+        choices=("default", "max-autotune-no-cudagraphs"),
+        default="default",
+    )
     p.add_argument("--segmented-scatter", action="store_true")
     p.add_argument("--async-grad-check", action="store_true")
     p.add_argument("--stop-file", type=Path)
@@ -168,6 +177,14 @@ def parse_args():
         )
     if args.head_precision == "fp16-edge" and args.scaled_linear:
         p.error("FP16 edge mode cannot use adaptive scaled linear operations")
+    if args.skinny_readout and args.head_precision != "fp16-edge":
+        p.error("Skinny readout requires FP16 edge precision")
+    if args.tuned_edge_kernels and args.head_precision != "fp16-edge":
+        p.error("Tuned edge kernels require FP16 edge precision")
+    if args.allow_fp16_cache and not args.packed_data:
+        p.error("FP16 feature caches require packed targets")
+    if args.pack_features_fp16 and not (args.packed_data and args.fast_packed_loader):
+        p.error("FP16 feature packing requires the fast packed loader")
     if args.threaded_prefetch and not args.device_prefetch:
         p.error("Threaded prefetch requires device prefetch")
     if args.prefetch_factor < 1:
@@ -232,12 +249,18 @@ def main():
             ("grouped_mole", False),
             ("block_so2", False),
             ("projected_readout", False),
+            ("skinny_readout", False),
+            ("tuned_edge_kernels", False),
+            ("allow_fp16_cache", False),
+            ("pack_features_fp16", False),
+            ("compile_mode", "default"),
             ("fused_rotations", False),
             ("fused_backbone", False),
             ("scaled_linear", False),
             ("fused_scatter", False),
             ("fused_wigner", False),
             ("fused_radial", False),
+            ("radial_tile", 64),
             ("segmented_scatter", False),
         ):
             setattr(
@@ -344,6 +367,14 @@ def main():
         enable_fused_radial(model.head)
     head = model.head
     configure_head_precision(head, args.head_precision)
+    if args.skinny_readout:
+        from fairchem.core.frozen_hip.edge_precision import enable_skinny_readout
+
+        enable_skinny_readout(head)
+    if args.tuned_edge_kernels:
+        from fairchem.core.frozen_hip.edge_precision import enable_tuned_edge_kernels
+
+        enable_tuned_edge_kernels(head)
     if args.compile_head:
         # The small head fits one gradient bucket. Avoid DDP graph splitting,
         # whose symbolic reshape handling fails for variable molecular graphs.
@@ -351,14 +382,14 @@ def main():
         torch._dynamo.config.recompile_limit = 16
         for block in head.blocks:
             if not args.head_experts:
-                block.compile(dynamic=True)
+                block.compile(dynamic=True, mode=args.compile_mode)
         if args.projected_readout:
             head.projected_edge_irreps = torch.compile(
-                head.projected_edge_irreps, dynamic=True
+                head.projected_edge_irreps, dynamic=True, mode=args.compile_mode
             )
         else:
             head.edge_readout.forward_messages = torch.compile(
-                head.edge_readout.forward_messages, dynamic=True
+                head.edge_readout.forward_messages, dynamic=True, mode=args.compile_mode
             )
     optimizer = torch.optim.AdamW(
         head.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True
@@ -394,6 +425,10 @@ def main():
             raise ValueError("Resume requires the same head width")
         if state.get("dataset_revision") != args.dataset_revision:
             raise ValueError("Resume requires the same dataset revision")
+        if state.get("allow_fp16_cache", False) != args.allow_fp16_cache:
+            raise ValueError("Resume requires the same feature cache storage precision")
+        if state.get("pack_features_fp16", False) != args.pack_features_fp16:
+            raise ValueError("Resume requires the same feature packing precision")
         if state.get("head_experts", 0) != args.head_experts:
             raise ValueError("Resume requires the same HIP expert count")
         if state.get("head_charge_spin", False) != args.head_charge_spin:
@@ -466,6 +501,8 @@ def main():
                 grouped_mole=args.grouped_mole,
                 window_files=args.window_shards,
                 feature_cache=cache_root,
+                allow_fp16_cache=args.allow_fp16_cache,
+                pack_features_fp16=args.pack_features_fp16,
                 include_cache_metadata=not args.feature_cache_read_only,
                 fast_packing=args.fast_packed_loader,
                 prefetch_window=args.packed_window_prefetch,
@@ -717,10 +754,16 @@ def main():
             and args.backbone_precision == "fp16",
             "block_so2": args.block_so2,
             "projected_readout": args.projected_readout,
+            "skinny_readout": args.skinny_readout,
+            "tuned_edge_kernels": args.tuned_edge_kernels,
+            "allow_fp16_cache": args.allow_fp16_cache,
+            "pack_features_fp16": args.pack_features_fp16,
+            "compile_mode": args.compile_mode,
             "fused_rotations": args.fused_rotations,
             "fused_scatter": args.fused_scatter,
             "fused_wigner": args.fused_wigner,
             "fused_radial": args.fused_radial,
+            "radial_tile": args.radial_tile,
             "segmented_scatter": args.segmented_scatter,
             "scaled_linear": args.scaled_linear,
             "available_shards": len(inventory),
@@ -1153,10 +1196,20 @@ def main():
         from fairchem.core.frozen_hip.wigner import enable_fused_wigner
 
         enable_fused_wigner(head, enabled=state.get("fused_wigner", False))
-        from fairchem.core.frozen_hip.radial import enable_fused_radial
+        from fairchem.core.frozen_hip.radial import (
+            configure_radial_tile,
+            enable_fused_radial,
+        )
 
+        configure_radial_tile(state.get("radial_tile", 64))
         enable_fused_radial(head, enabled=state.get("fused_radial", False))
         configure_head_precision(head, args.head_precision)
+        from fairchem.core.frozen_hip.edge_precision import enable_skinny_readout
+
+        enable_skinny_readout(head, enabled=state.get("skinny_readout", False))
+        from fairchem.core.frozen_hip.edge_precision import enable_tuned_edge_kernels
+
+        enable_tuned_edge_kernels(head, enabled=state.get("tuned_edge_kernels", False))
         evaluate(final=True)
     if rank == 0:
         assert parameter_hash(model.backbone) == frozen_hash

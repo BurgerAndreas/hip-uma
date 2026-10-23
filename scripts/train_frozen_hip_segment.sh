@@ -64,11 +64,11 @@ queue_successor() {
             fi
             # A predecessor's earlier failed state can invalidate its dependency.
             # Replace that dependency after a scheduler requeue, without polling.
-            timeout 60s scancel "$previous" || true
+            timeout -k 5s 60s scancel "$previous" || true
         fi
     fi
     local response
-    if response=$(SEGMENT_INDEX=$((SEGMENT_INDEX + 1)) timeout 150s sbatch \
+    if response=$(SEGMENT_INDEX=$((SEGMENT_INDEX + 1)) timeout -k 5s 150s sbatch \
         --parsable --dependency="afterany:$SLURM_JOB_ID" --kill-on-invalid-dep=yes \
         --export=ALL "$CONTINUATION_SCRIPT"); then
         continuation_job="${response%%;*}"
@@ -88,7 +88,7 @@ queue_successor() {
 }
 cancel_successor() {
     if [[ -n "$continuation_job" ]]; then
-        timeout 60s scancel "$continuation_job" || true
+        timeout -k 5s 60s scancel "$continuation_job" || true
     fi
 }
 queue_successor || true
@@ -136,6 +136,11 @@ if [[ -n "${PACKED_WINDOW_MEMORY_GB:-}" ]]; then
 fi
 if [[ "${FUSED_RADIAL:-0}" == 1 ]]; then args+=(--fused-radial); fi
 if [[ -n "${RADIAL_TILE:-}" ]]; then args+=(--radial-tile "$RADIAL_TILE"); fi
+if [[ "${SKINNY_READOUT:-0}" == 1 ]]; then args+=(--skinny-readout); fi
+if [[ "${TUNED_EDGE_KERNELS:-0}" == 1 ]]; then args+=(--tuned-edge-kernels); fi
+if [[ "${ALLOW_FP16_CACHE:-0}" == 1 ]]; then args+=(--allow-fp16-cache); fi
+if [[ "${PACK_FEATURES_FP16:-0}" == 1 ]]; then args+=(--pack-features-fp16); fi
+if [[ -n "${COMPILE_MODE:-}" ]]; then args+=(--compile-mode "$COMPILE_MODE"); fi
 if [[ -n "${CODE_REVISION:-}" ]]; then args+=(--code-revision "$CODE_REVISION"); fi
 
 stop_continuation=0

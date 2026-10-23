@@ -50,9 +50,18 @@ def load_legacy_index(path, revision):
         raise ValueError("Legacy index must contain sorted unique IDs")
     if sample_fingerprint(ids) != metadata["sample_ids_sha256"]:
         raise ValueError("Legacy index sample identities differ")
-    if any(Path(name).name != name or not name.endswith(".hip") for name in metadata["files"]):
+    if any(
+        Path(name).name != name or not name.endswith(".hip")
+        for name in metadata["files"]
+    ):
         raise ValueError("Legacy index has invalid bundle names")
     return ids, metadata["files"]
+
+
+def consume_staged_input(args, index):
+    """Remove an optional staging payload after its packed output is complete."""
+    if getattr(args, "consume_staged_input", False):
+        (args.staged_input / f"{index:06d}.npz").unlink(missing_ok=True)
 
 
 def download_file(task):
@@ -279,8 +288,14 @@ def main():
     p.add_argument("--sparse-base", action="store_true")
     p.add_argument("--staged-input", type=Path)
     p.add_argument("--legacy-index", type=Path)
-    p.add_argument("--group-indices", help="Finite smoke-test groups; does not write a worker receipt")
+    p.add_argument("--consume-staged-input", action="store_true")
+    p.add_argument(
+        "--group-indices",
+        help="Finite smoke-test groups; does not write a worker receipt",
+    )
     args = p.parse_args()
+    if args.consume_staged_input and args.staged_input is None:
+        p.error("Consuming staged input requires a staging directory")
     inventory = json.loads(args.inventory.read_text())
     args.output.mkdir(parents=True, exist_ok=True)
     if args.finalize:
@@ -360,6 +375,7 @@ def main():
         receipt = path.with_suffix(".json")
         if path.exists() and receipt.exists():
             entries.append(json.loads(receipt.read_text()))
+            consume_staged_input(args, index)
             continue
         print(
             json.dumps(dict(event="read_group", group=index, files=len(group))),
@@ -375,7 +391,9 @@ def main():
                 raise ValueError("Packed output disappeared after CPU staging")
             if marker["samples"] == 0:
                 continue
-            with np.load(args.staged_input / f"{index:06d}.npz", allow_pickle=False) as f:
+            with np.load(
+                args.staged_input / f"{index:06d}.npz", allow_pickle=False
+            ) as f:
                 values = {key: f[key] for key in f.files}
             if len(values["natoms"]) != marker["samples"]:
                 raise ValueError("Staged sample count differs")
@@ -448,6 +466,7 @@ def main():
             ids=arrays["omol_index"].astype(np.int64).tolist(),
         )
         write_manifest(receipt, entry)
+        consume_staged_input(args, index)
         entries.append(entry)
         print(
             json.dumps(

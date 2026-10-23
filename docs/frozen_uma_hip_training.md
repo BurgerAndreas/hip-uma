@@ -1169,7 +1169,7 @@ row; the former index-based one-percent holdout does not apply to them.
 
 The release targets 10,800,000 training and 200,000 held-out validation geometries.
 The pinned snapshot contains 10,353,639 published training labels and 90,934
-published validation labels. All six runs use that fixed training snapshot.
+published validation labels. All runs use that fixed training snapshot.
 Preparation selects one deterministic 10,000-label validation cohort. Every run
 uses this cohort every 400,000 steps. Final evaluation uses a separate manifest
 for all 200,000 validation IDs and loads the last checkpoint. An incomplete final
@@ -1197,3 +1197,52 @@ For a matched two-million-update ablation, use the dense MAE, zero-decay run as
 the baseline. Keep the 64-geometry cap, 2,560-atom target, physical work limit,
 seed, learning-rate schedule, and fixed validation cohort unchanged. This baseline
 has the lowest eigenvalue MAE among the completed two-million-update runs.
+
+
+### Optional kernels and feature storage
+
+`--skinny-readout` projects FP16 edge messages directly to FP32 Cartesian
+coefficients. It avoids wide FP32 message copies. The combined implementation
+also avoids separate activation-gradient concatenations. Parameters, products,
+reductions, and weight gradients stay FP32. The returned activation gradients
+use FP16. Small edge batches keep the original projection.
+
+`--tuned-edge-kernels` widens channel tiles for large segmented scatter and
+gather operations. It also replaces radial input-gradient atomics with segmented
+reductions on target-major complete graphs. The kernels require contiguous atom
+indices within each geometry. All node reductions stay FP32. Wide edge offsets
+use 64-bit arithmetic. These options require `--head-precision fp16-edge`.
+
+`--radial-tile 256` now applies to the mixed-precision radial kernels as well.
+Measure the full update before selecting these options. A faster isolated
+kernel does not guarantee a faster complete training step.
+
+Use `tools/convert_frozen_hip_cache.py` on CPU compute resources to make an
+independent FP16 feature cache:
+
+```sh
+python tools/convert_frozen_hip_cache.py \
+  --source "$FP32_FEATURES" --output "$FP16_FEATURES" \
+  --workers 8 --max-relative-error 0.0003
+```
+
+The converter preserves source arrays. It checks finite values, range, shape,
+source identity, and a conservative relative L2 error bound. It writes payload
+checksums and publishes each array atomically. It keeps Hessian labels unchanged.
+`--allow-fp16-cache` explicitly permits the marked FP16 arrays. Old FP32 caches
+still work without this flag. `--pack-features-fp16` also packs inline training
+features in FP16. This avoids promoting mixed cache batches to FP32 during CPU
+collation. The head receives FP32 node features after transfer. Targets remain
+FP32. Monitoring and final validation retain their original feature arrays.
+Checkpoints record both storage flags and reject a change during resume.
+
+The allocation wrapper exposes `SKINNY_READOUT`, `TUNED_EDGE_KERNELS`,
+`ALLOW_FP16_CACHE`, and `PACK_FEATURES_FP16`. Each defaults to zero.
+`COMPILE_MODE=max-autotune-no-cudagraphs` enables optional compiler tuning.
+The default compile mode remains unchanged. Benchmark graph capture separately.
+
+Use the same head checkpoint, sample IDs, geometry frames, and random seeds for
+numerical comparisons. Report mass-weighted, Eckart-projected metrics as well
+as Hessian and parameter-gradient errors. A short numerical diagnostic cannot
+establish convergence equivalence. Test maximum molecule sizes with populated
+CUDA graph caches before increasing the physical microbatch limit.
