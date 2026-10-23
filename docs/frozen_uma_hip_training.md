@@ -1257,6 +1257,12 @@ Keep manual capture disabled for large conditioned heads until the exact runtime
 passes maximum-size checks. One conditioned stress case still failed after the
 stream fix. The qualified production configuration disables manual capture.
 
+A full-data FP16 trial with fixed loss scale 1024 and learning rate 0.003
+produced nonfinite gradients after more than 6,100 updates. Its short accuracy
+and memory checks passed. These checks do not establish training stability.
+Keep long runs blocked until their full-data gradient checks pass. Diagnose the
+failing batch before selecting adaptive scaling or another precision policy.
+
 A resumed checkpoint can precede an interrupted validation. At a scheduled
 validation step, training checks for a complete record from the exact fixed
 cohort. It repeats missing validation before it advances the optimizer. A
