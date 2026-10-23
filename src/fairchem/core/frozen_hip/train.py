@@ -38,6 +38,7 @@ from fairchem.core.frozen_hip.precision import configure_head_precision
 from fairchem.core.frozen_hip.rotations import enable_fused_rotations
 from fairchem.core.frozen_hip.validation import (
     EvaluationStream,
+    append_evaluation,
     load_last_head,
     load_manifest,
     monitoring_complete,
@@ -918,8 +919,7 @@ def main():
                 temporary.replace(args.output / "final_evaluation.json")
                 (args.output / "final_evaluation_pending.json").unlink(missing_ok=True)
             print(json.dumps(row), flush=True)
-            with (args.output / "evaluation.jsonl").open("a") as f:
-                f.write(json.dumps(row) + "\n")
+            append_evaluation(args.output / "evaluation.jsonl", row)
         model.train()
 
     if rank == 0:

@@ -195,3 +195,18 @@ def test_monitoring_resume_requires_the_complete_exact_cohort(tmp_path):
     assert not monitoring_complete(path, 400000, cohort)
     path.write_text('{"event":')
     assert not monitoring_complete(path, 400000, cohort)
+
+
+@pytest.mark.parametrize("tail", ['{"event":', '{"step": 2}'])
+def test_evaluation_append_repairs_only_the_incomplete_tail(tmp_path, tail):
+    from fairchem.core.frozen_hip.validation import append_evaluation
+
+    path = tmp_path / "evaluation.jsonl"
+    path.write_text('{"step": 1}\n' + tail)
+    append_evaluation(path, {"step": 3})
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    expected = [{"step": 1}]
+    if tail == '{"step": 2}':
+        expected.append({"step": 2})
+    expected.append({"step": 3})
+    assert records == expected

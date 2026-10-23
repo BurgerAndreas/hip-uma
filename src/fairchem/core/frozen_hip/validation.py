@@ -32,6 +32,26 @@ DATA_REVISION = "7ce83e7425649619c9f85dad485bb2cfd7ee12bd"
 SELECTION = "parent-holdout-splitmix64-v1"
 
 
+def append_evaluation(path, record):
+    """Preserve complete records and replace an interrupted trailing write."""
+    path = Path(path)
+    with path.open("a+b") as stream:
+        stream.seek(0)
+        previous = stream.read()
+        if previous and not previous.endswith(b"\n"):
+            boundary = previous.rfind(b"\n") + 1
+            try:
+                json.loads(previous[boundary:])
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                stream.seek(boundary)
+                stream.truncate()
+            else:
+                stream.write(b"\n")
+        stream.write((json.dumps(record) + "\n").encode())
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def monitoring_complete(path, step, cohort):
     """Recognize a complete fixed-cohort record after a checkpoint restart."""
     from fairchem.core.frozen_hip.metrics import PROJECTED_METRIC_NAMES
