@@ -54,6 +54,7 @@ def parse_args():
     p.add_argument("--steps", type=int, default=200000)
     p.add_argument("--duration", type=float, default=13200)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--compile-edge-limit", type=int, default=393216)
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument(
         "--loss", choices=("mse", "mae", "block-rmse", "mass-block-rmse"), default="mse"
@@ -390,20 +391,30 @@ def main():
 
         enable_tuned_edge_kernels(head)
     if args.compile_head:
+        from fairchem.core.frozen_hip.compilation import bounded_compile
+
         # The small head fits one gradient bucket. Avoid DDP graph splitting,
         # whose symbolic reshape handling fails for variable molecular graphs.
         torch._dynamo.config.optimize_ddp = False
         torch._dynamo.config.recompile_limit = 16
         for block in head.blocks:
             if not args.head_experts:
-                block.compile(dynamic=True, mode=args.compile_mode)
+                block.forward = bounded_compile(
+                    block.forward,
+                    max_edges=args.compile_edge_limit,
+                    mode=args.compile_mode,
+                )
         if args.projected_readout:
-            head.projected_edge_irreps = torch.compile(
-                head.projected_edge_irreps, dynamic=True, mode=args.compile_mode
+            head.projected_edge_irreps = bounded_compile(
+                head.projected_edge_irreps,
+                max_edges=args.compile_edge_limit,
+                mode=args.compile_mode,
             )
         else:
-            head.edge_readout.forward_messages = torch.compile(
-                head.edge_readout.forward_messages, dynamic=True, mode=args.compile_mode
+            head.edge_readout.forward_messages = bounded_compile(
+                head.edge_readout.forward_messages,
+                max_edges=args.compile_edge_limit,
+                mode=args.compile_mode,
             )
     optimizer = torch.optim.AdamW(
         head.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True
@@ -850,6 +861,7 @@ def main():
             "allow_fp16_cache": args.allow_fp16_cache,
             "pack_features_fp16": args.pack_features_fp16,
             "compile_mode": args.compile_mode,
+            "compile_edge_limit": args.compile_edge_limit,
             "fused_rotations": args.fused_rotations,
             "fused_scatter": args.fused_scatter,
             "fused_wigner": args.fused_wigner,
