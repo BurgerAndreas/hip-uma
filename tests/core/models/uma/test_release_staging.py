@@ -3,6 +3,8 @@
 import hashlib
 import io
 import json
+import pickle
+import urllib.error
 from types import SimpleNamespace
 
 import h5py
@@ -84,3 +86,54 @@ def test_buffered_source_checks_full_content(tmp_path, monkeypatch):
     record["bytes"] = (128 << 20) + 1
     with pytest.raises(ValueError, match="memory bound"):
         staging.source_file(record, args, inventory)
+
+
+def test_http_worker_error_is_serializable(tmp_path, monkeypatch):
+    path = tmp_path / "error.txt"
+    path.write_text("rate limit")
+    response = path.open("rb")
+    error = urllib.error.HTTPError("https://example.test/source", 429, "Too Many Requests", {}, response)
+
+    def reject(_task):
+        raise error
+
+    monkeypatch.setattr(staging, "stage_group", reject)
+    report = staging.stage_group_safely((17, []))
+    assert report["failed"] and report["http_status"] == 429
+    assert pickle.loads(pickle.dumps(report)) == report
+    assert response.closed
+
+
+def test_download_retry_honors_server_window():
+    error = urllib.error.HTTPError("https://example.test/source", 429, "Too Many Requests", {"Retry-After": "71"}, None)
+    assert staging.retry_delay(error, 0) >= 71
+    error.headers = {"RateLimit": '"resolvers";r=0;t=219'}
+    assert staging.retry_delay(error, 0) >= 219
+
+
+def test_resolver_budget_is_shared(monkeypatch):
+    delays = []
+    monkeypatch.setattr(staging.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(staging.time, "sleep", delays.append)
+    limiter = staging.ResolverLimiter(4)
+    for _ in range(4):
+        limiter.acquire()
+    assert delays == [0.25, 0.5, 0.75]
+
+
+def test_legacy_index_verifies_identity(tmp_path):
+    from tools.prepare_frozen_hip_release import load_legacy_index, sample_fingerprint
+
+    ids = np.array([4, 7, 19], dtype=np.int64)
+    path = tmp_path / "legacy_ids.npy"
+    np.save(path, ids)
+    metadata = dict(dataset_revision="a"*40, samples=3, sample_ids_sha256=sample_fingerprint(ids), files=["bundle_000001.hip"])
+    path.with_suffix(".json").write_text(json.dumps(metadata))
+    actual, files = load_legacy_index(path, "a"*40)
+    np.testing.assert_array_equal(actual, ids)
+    assert files == metadata["files"]
+    with pytest.raises(ValueError, match="another release"):
+        load_legacy_index(path, "b"*40)
+    np.save(path, ids + 1)
+    with pytest.raises(ValueError, match="identities"):
+        load_legacy_index(path, "a"*40)

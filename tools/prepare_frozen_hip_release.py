@@ -38,6 +38,23 @@ def membership(ids, sorted_ids):
     )
 
 
+def load_legacy_index(path, revision):
+    """Load the CPU stage's verified ID index and portable bundle names."""
+    metadata = json.loads(path.with_suffix(".json").read_text())
+    if metadata["dataset_revision"] != revision:
+        raise ValueError("Legacy index belongs to another release")
+    ids = np.load(path, mmap_mode="r", allow_pickle=False)
+    if ids.ndim != 1 or ids.dtype != np.int64 or len(ids) != metadata["samples"]:
+        raise ValueError("Legacy index shape differs")
+    if len(ids) > 1 and np.any(ids[1:] <= ids[:-1]):
+        raise ValueError("Legacy index must contain sorted unique IDs")
+    if sample_fingerprint(ids) != metadata["sample_ids_sha256"]:
+        raise ValueError("Legacy index sample identities differ")
+    if any(Path(name).name != name or not name.endswith(".hip") for name in metadata["files"]):
+        raise ValueError("Legacy index has invalid bundle names")
+    return ids, metadata["files"]
+
+
 def download_file(task):
     row, args, inventory = task
     if args.sparse_base and row["parent_partition"] == 0:
@@ -261,6 +278,7 @@ def main():
     p.add_argument("--group-files", type=int, default=4)
     p.add_argument("--sparse-base", action="store_true")
     p.add_argument("--staged-input", type=Path)
+    p.add_argument("--legacy-index", type=Path)
     p.add_argument("--group-indices", help="Finite smoke-test groups; does not write a worker receipt")
     args = p.parse_args()
     inventory = json.loads(args.inventory.read_text())
@@ -278,17 +296,24 @@ def main():
         args.hub_filesystem = HfFileSystem(token=args.token.read_text().strip())
     print(json.dumps(dict(event="scan_legacy", worker=args.rank)), flush=True)
     legacy = []
-    for path in sorted(args.legacy_packed.glob("*.hip")):
-        values, _ = open_packed(path)
-        legacy.append(np.asarray(values["omol_index"]).copy())
+    if args.legacy_index:
+        legacy_ids, names = load_legacy_index(args.legacy_index, inventory["revision"])
+        paths = [args.legacy_packed / name for name in names]
+    else:
+        paths = sorted(args.legacy_packed.glob("*.hip"))
+    for path in paths:
+        if args.legacy_index is None:
+            values, _ = open_packed(path)
+            legacy.append(np.asarray(values["omol_index"]).copy())
         target = args.output / "train" / path.name
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             target.symlink_to(path.resolve())
         except FileExistsError:
             pass
-    print(json.dumps(dict(event="legacy_scanned", bundles=len(legacy))), flush=True)
-    legacy_ids = np.sort(np.concatenate(legacy))
+    print(json.dumps(dict(event="legacy_scanned", bundles=len(paths))), flush=True)
+    if args.legacy_index is None:
+        legacy_ids = np.sort(np.concatenate(legacy))
     del legacy
     allowed_base = np.sort(np.load(args.manifests / "sample_10m.npz")["indices"])
     allowed_add = np.sort(

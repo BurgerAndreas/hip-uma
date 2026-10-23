@@ -12,7 +12,9 @@ import io
 import json
 import multiprocessing
 import os
+import re
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -30,6 +32,40 @@ from tools.prepare_frozen_hip_release import (
 )
 
 _context = None
+
+
+class ResolverLimiter:
+    """Share one request budget across all download processes."""
+
+    def __init__(self, requests_per_second):
+        self.period = 1.0 / requests_per_second
+        context = multiprocessing.get_context("fork")
+        self.lock = context.Lock()
+        self.next_slot = context.Value("d", 0.0)
+
+    def acquire(self):
+        with self.lock:
+            now = time.monotonic()
+            slot = max(now, self.next_slot.value)
+            self.next_slot.value = slot + self.period
+        delay = slot - now
+        if delay > 0:
+            time.sleep(delay)
+
+
+def retry_delay(error, attempt):
+    """Honor server cooldowns instead of immediately repeating rejected reads."""
+    headers = getattr(error, "headers", None) or {}
+    delay = headers.get("Retry-After")
+    if delay is not None:
+        try:
+            return min(305.0, max(0.0, float(delay))) + 0.5
+        except ValueError:
+            pass
+    if getattr(error, "code", None) == 429:
+        window = re.search(r"(?:^|;)\s*t=(\d+)", headers.get("RateLimit", ""))
+        return min(305.0, float(window.group(1)) + 1) if window else 60.0
+    return min(30.0, float(2**attempt))
 
 
 def release_groups(inventory, group_files):
@@ -61,6 +97,9 @@ def initialize(args, inventory, legacy_ids, allowed):
 
 
 def source_file(record, args, inventory):
+    limiter = getattr(args, "resolver_limiter", None)
+    if limiter is not None:
+        limiter.acquire()
     if record["parent_partition"] != 0 or args.base_read_mode == "sparse":
         return download_file((record, args, inventory))
     # One sequential request can outperform many high-latency range requests.
@@ -118,7 +157,8 @@ def stage_group(task):
         for record in group:
             # Sparse range reads avoid downloading the full original dataset.
             # Independent processes overlap the latency without h5py's lock.
-            for attempt in range(3):
+            attempts = getattr(args, "download_attempts", 8)
+            for attempt in range(attempts):
                 source = None
                 try:
                     source = source_file(record, args, inventory)
@@ -126,10 +166,13 @@ def stage_group(task):
                         source, record, legacy_ids, allowed[(partition, split)]
                     )
                     break
-                except (OSError, TimeoutError):
-                    if attempt == 2:
+                except (OSError, TimeoutError) as error:
+                    if attempt + 1 == attempts:
                         raise
-                    time.sleep(2 ** attempt)
+                    delay = retry_delay(error, attempt)
+                    if isinstance(error, urllib.error.HTTPError):
+                        error.close()
+                    time.sleep(delay)
                 finally:
                     if hasattr(source, "close"):
                         source.close()
@@ -150,6 +193,20 @@ def stage_group(task):
     })
 
 
+def stage_group_safely(task):
+    """Return plain metadata; HTTP exceptions contain unpicklable file handles."""
+    try:
+        return stage_group(task)
+    except Exception as error:
+        report = dict(group=task[0], failed=True, error_type=type(error).__name__)
+        if isinstance(error, urllib.error.HTTPError):
+            report.update(http_status=error.code, error=str(error.reason))
+            error.close()
+        else:
+            report["error"] = str(error)
+        return report
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--inventory", type=Path, required=True)
@@ -159,18 +216,25 @@ def main():
     p.add_argument("--staged-output", type=Path, required=True)
     p.add_argument("--token", type=Path, required=True)
     p.add_argument("--workers", type=int, default=16)
+    p.add_argument("--resolver-rps", type=float, default=12)
+    p.add_argument("--download-attempts", type=int, default=8)
     p.add_argument("--base-read-mode", choices=["sparse", "buffered"], default="sparse")
     p.add_argument("--group-files", type=int, default=4)
     p.add_argument("--limit-groups", type=int)
     p.add_argument("--group-indices", help="Comma-separated groups for a finite smoke test")
     args = p.parse_args()
+    if args.workers < 1 or args.resolver_rps <= 0 or args.download_attempts < 1:
+        p.error("Worker count, request budget, and attempts must be positive")
     args.sparse_base = True
+    args.resolver_limiter = ResolverLimiter(args.resolver_rps)
     inventory = json.loads(args.inventory.read_text())
     args.staged_output.mkdir(parents=True, exist_ok=True)
     legacy = []
+    legacy_files = []
     for path in sorted(args.legacy_packed.glob("*.hip")):
         arrays, _ = open_packed(path)
         legacy.append(np.asarray(arrays["omol_index"]).copy())
+        legacy_files.append(path.name)
         target = args.output / "train" / path.name
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -189,6 +253,17 @@ def main():
     }
     if not membership(legacy_ids, allowed[(0, "train")]).all():
         raise ValueError("Legacy labels leave the training split")
+    # Feature workers can reuse this small verified index instead of reopening
+    # every target bundle. It also permits compute on another filesystem.
+    index = args.staged_output / "legacy_ids.npy"
+    temporary = index.with_suffix(f".{os.getpid()}.tmp")
+    with temporary.open("wb") as handle:
+        np.save(handle, legacy_ids, allow_pickle=False)
+    temporary.replace(index)
+    write_manifest(index.with_suffix(".json"), dict(
+        dataset_revision=inventory["revision"], samples=len(legacy_ids),
+        sample_ids_sha256=sample_fingerprint(legacy_ids), files=legacy_files,
+    ))
     groups = release_groups(inventory, args.group_files)
     tasks = list(enumerate(groups))
     if args.group_indices:
@@ -209,10 +284,14 @@ def main():
         initializer=initialize,
         initargs=(args, inventory, legacy_ids, allowed),
     ) as pool:
-        futures = {pool.submit(stage_group, task): task[0] for task in tasks}
+        futures = {pool.submit(stage_group_safely, task): task[0] for task in tasks}
         for future in as_completed(futures):
             try:
                 report = future.result()
+                if report.get("failed"):
+                    errors.append(report)
+                    print(json.dumps(dict(event="stage_error", **report)), flush=True)
+                    continue
                 samples += report["samples"]
                 completed += 1
                 if not report.get("reused") or completed % 100 == 0:
