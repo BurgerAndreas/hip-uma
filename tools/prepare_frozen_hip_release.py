@@ -260,6 +260,8 @@ def main():
     p.add_argument("--finalize", action="store_true")
     p.add_argument("--group-files", type=int, default=4)
     p.add_argument("--sparse-base", action="store_true")
+    p.add_argument("--staged-input", type=Path)
+    p.add_argument("--group-indices", help="Finite smoke-test groups; does not write a worker receipt")
     args = p.parse_args()
     inventory = json.loads(args.inventory.read_text())
     args.output.mkdir(parents=True, exist_ok=True)
@@ -270,7 +272,7 @@ def main():
         p.error("Invalid worker rank")
     torch.set_num_threads(2)
     torch.backends.cuda.matmul.allow_tf32 = True
-    if args.sparse_base:
+    if args.sparse_base and args.staged_input is None:
         from huggingface_hub import HfFileSystem
 
         args.hub_filesystem = HfFileSystem(token=args.token.read_text().strip())
@@ -316,8 +318,13 @@ def main():
             subset[i : i + args.group_files]
             for i in range(0, len(subset), args.group_files)
         )
+    indices = range(args.rank, len(groups), args.world)
+    if args.group_indices:
+        indices = [int(x) for x in args.group_indices.split(",")]
+        if not indices or min(indices) < 0 or max(indices) >= len(groups):
+            p.error("Invalid group selection")
     entries = []
-    for index in range(args.rank, len(groups), args.world):
+    for index in indices:
         group = groups[index]
         split = group[0]["split"]
         partition = group[0]["parent_partition"]
@@ -333,30 +340,48 @@ def main():
             json.dumps(dict(event="read_group", group=index, files=len(group))),
             flush=True,
         )
-        parts = []
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            for record, source in zip(
-                group,
-                pool.map(download_file, [(r, args, inventory) for r in group]),
-                strict=True,
-            ):
-                allowed = (
-                    allowed_base
-                    if partition == 0
-                    else allowed_add
-                    if split == "train"
-                    else allowed_val
-                )
-                try:
-                    values = selected_arrays(source, record, legacy_ids, allowed)
-                finally:
-                    if hasattr(source, "close"):
-                        source.close()
-                if values is not None:
-                    parts.append(values)
-        if not parts:
-            continue
-        values = concatenate(parts)
+        if args.staged_input is not None:
+            marker = json.loads((args.staged_input / f"{index:06d}.json").read_text())
+            if marker["dataset_revision"] != inventory["revision"]:
+                raise ValueError("Staged dataset revision differs")
+            if marker["group"] != index:
+                raise ValueError("Staged group identity differs")
+            if marker.get("already_packed"):
+                raise ValueError("Packed output disappeared after CPU staging")
+            if marker["samples"] == 0:
+                continue
+            with np.load(args.staged_input / f"{index:06d}.npz", allow_pickle=False) as f:
+                values = {key: f[key] for key in f.files}
+            if len(values["natoms"]) != marker["samples"]:
+                raise ValueError("Staged sample count differs")
+            if sample_fingerprint(values["omol_index"]) != marker["sample_ids_sha256"]:
+                raise ValueError("Staged sample identities differ")
+            parts = []
+        else:
+            parts = []
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for record, source in zip(
+                    group,
+                    pool.map(download_file, [(r, args, inventory) for r in group]),
+                    strict=True,
+                ):
+                    allowed = (
+                        allowed_base
+                        if partition == 0
+                        else allowed_add
+                        if split == "train"
+                        else allowed_val
+                    )
+                    try:
+                        values = selected_arrays(source, record, legacy_ids, allowed)
+                    finally:
+                        if hasattr(source, "close"):
+                            source.close()
+                    if values is not None:
+                        parts.append(values)
+            if not parts:
+                continue
+            values = concatenate(parts)
         batches = []
         features = []
         sampler = BalancedBatchSampler(
@@ -413,6 +438,8 @@ def main():
         del values, parts, batches, features, arrays
     if parameter_hash(model.backbone) != frozen:
         raise ValueError("Frozen backbone changed")
+    if args.group_indices:
+        return
     write_manifest(
         args.output / "receipts" / f"{args.rank:03d}.json",
         dict(rank=args.rank, entries=entries, backbone_sha256=frozen),

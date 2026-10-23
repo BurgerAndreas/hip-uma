@@ -1143,6 +1143,25 @@ system. Downloads of new shards receive full SHA-256 checks. The tool validates
 teacher identity, units, row identities, partition membership, and finite values.
 It can resume completed preparation groups.
 
+For larger additions, run `tools/stage_frozen_hip_release.py` in a CPU allocation
+before allocating feature-extraction GPUs. `--workers` controls independent
+reader processes. Each process owns its HDF5 handles and HTTP client, so HDF5's
+process-wide lock does not serialize all network reads. Existing packed groups
+receive reuse markers. Missing rows enter uncompressed, atomic staging files.
+Completed groups survive restarts, and failures prevent a complete staging marker.
+The default sparse mode minimizes transferred bytes. Benchmark
+`--base-read-mode buffered` when network latency dominates. It reads each original
+shard through one sequential request, verifies its full SHA-256 checksum, and
+keeps only selected rows. Source buffers stay in memory and reject shards larger
+than 128 MiB. This mode trades more network traffic for fewer requests; it does
+not retain another complete source dataset on disk.
+GPU workers then use `--staged-input` with the same inventory and group size.
+They verify sample identities and read local arrays without network requests.
+Keep the original logical preparation ranks even when fewer GPUs execute them.
+The finalizer still requires all logical worker receipts and exact split counts.
+`--group-indices` restricts a finite feature smoke test and never writes a complete
+worker receipt. Preparation changes no Hessian values or feature precision.
+
 Parent IDs belong to separate namespaces. Partition zero keeps its integer ID.
 Partition one adds `2**60`. Preparation checks uniqueness and zero overlap before
 publishing `READY.json`. Explicit release bundles include every selected training
