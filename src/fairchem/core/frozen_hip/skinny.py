@@ -1,4 +1,4 @@
-"""FP32 skinny projections that read FP16 activations without wide casts."""
+"""FP32 skinny projections that preserve FP16 or FP32 activation storage."""
 
 from __future__ import annotations
 
@@ -334,8 +334,8 @@ def skinny_project(messages, weights, bias=None):
     """Project all SO2 components with one shared activation-gradient buffer."""
     if messages.ndim != 3 or messages.shape[1] != 9 or not messages.is_contiguous():
         raise ValueError("Skinny projection requires contiguous degree-two messages")
-    if messages.dtype != torch.float16 or not messages.is_cuda:
-        raise ValueError("Skinny projection requires FP16 CUDA activations")
+    if messages.dtype not in (torch.float16, torch.float32) or not messages.is_cuda:
+        raise ValueError("Skinny projection requires FP16 or FP32 CUDA activations")
     channels = messages.shape[-1]
     for weight, n, width in zip(weights, (3, 4, 2), (3, 4, 2), strict=True):
         if weight.shape != (n, width * channels) or weight.dtype != torch.float32:
@@ -386,7 +386,7 @@ def skinny_linear(x, weight, bias=None):
     """
     if (
         not x.is_cuda
-        or x.dtype != torch.float16
+        or x.dtype not in (torch.float16, torch.float32)
         or weight.dtype != torch.float32
         or x.ndim != 2
         or x.stride(1) != 1

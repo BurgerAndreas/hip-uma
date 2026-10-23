@@ -15,7 +15,7 @@ import torch
 import triton
 from torch.library import triton_op, wrap_triton
 
-from fairchem.core.frozen_hip.linear import half_mm_float_output
+from fairchem.core.frozen_hip.linear import half_mm_float_output, quantize
 from fairchem.core.frozen_hip.radial import (
     _KERNEL_CONFIG,
     _backward_node,
@@ -37,14 +37,22 @@ from fairchem.core.models.uma.triton.kernels import (
 class HalfLinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w, b, out32):
-        xh = x.reshape(-1, x.shape[-1]).half()
-        wh = w.half()
-        ctx.save_for_backward(xh, wh)
+        flat = x.reshape(-1, x.shape[-1])
+        if out32:
+            # Learned message amplitudes can exceed the FP16 exponent range.
+            # Power-of-two scales retain tensor-core products without clipping.
+            xh, sx = quantize(flat)
+            wh, sw = quantize(w)
+            ctx.save_for_backward(xh, wh, sx, sw)
+        else:
+            xh, wh = flat.half(), w.half()
+            ctx.save_for_backward(xh, wh)
         ctx.shape = x.shape
         ctx.dtype = x.dtype
         ctx.bias = b is not None
+        ctx.out32 = out32
         if out32:
-            out = half_mm_float_output(xh, wh.t())
+            out = half_mm_float_output(xh, wh.t()) * (sx * sw)
             if b is not None:
                 out = out + b
         else:
@@ -54,8 +62,23 @@ class HalfLinear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g):
-        x, w = ctx.saved_tensors
+        x, w = ctx.saved_tensors[:2]
         g = g.reshape(-1, w.shape[0])
+        if ctx.out32:
+            sx, sw = ctx.saved_tensors[2:]
+            gh, sg = quantize(g)
+            dx = (
+                (half_mm_float_output(gh, w) * (sg * sw)).reshape(ctx.shape)
+                if ctx.needs_input_grad[0]
+                else None
+            )
+            dw = (
+                half_mm_float_output(gh.t(), x) * (sg * sx)
+                if ctx.needs_input_grad[1]
+                else None
+            )
+            db = g.float().sum(0) if ctx.bias and ctx.needs_input_grad[2] else None
+            return dx, dw, db, None
         gh = g.half()
         dx = (
             (
@@ -384,11 +407,11 @@ def enable_edge_precision(head, enabled=True):
                     module.forward = MethodType(norm_forward, module)
                 else:
                     module.forward = MethodType(so2_forward, module)
-        # The second convolution can exceed the FP16 output range before the
-        # node reduction and normalization. Keep its tensor-core products and
-        # outputs in FP32; loss scaling only protects the backward pass.
-        for module in block.so2_conv_2.modules():
-            if isinstance(module, (torch.nn.Linear, SO2_m_Conv)):
+        # Both convolutions can exceed the FP16 range as the head learns.
+        # Keep their outputs in FP32 and rescale GEMM operands before casting.
+        # The radial MLP retains its original selective FP16 dispatch.
+        for convolution in (block.so2_conv_1, block.so2_conv_2):
+            for module in (convolution.fc_m0, *convolution.so2_m_conv):
                 module.hip_fp32_output = enabled
         block.so2_conv_1.edge_mixed_precision = enabled
         block.so2_conv_2.edge_mixed_precision = enabled
@@ -401,3 +424,4 @@ def enable_edge_precision(head, enabled=True):
             elif hasattr(module, "_hip_original_edge_backend"):
                 module.backend = module._hip_original_edge_backend
     head.edge_mixed_precision = enabled
+    head.edge_range_scaling = enabled

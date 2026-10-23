@@ -19,14 +19,13 @@ import torch
     ],
 )
 @pytest.mark.parametrize("gradient_scale", [1.0, 1e-5, 1000.0])
-def test_skinny_projection_matches_double(shape, gradient_scale):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_skinny_projection_matches_double(shape, gradient_scale, dtype):
     from fairchem.core.frozen_hip.skinny import skinny_linear
 
     torch.manual_seed(33)
     m, k, n = shape
-    x = torch.randn(m, k + 37, device="cuda", dtype=torch.float16)[
-        :, :k
-    ].requires_grad_()
+    x = torch.randn(m, k + 37, device="cuda", dtype=dtype)[:, :k].requires_grad_()
     w = (torch.randn(n, k, device="cuda") / k**0.5).requires_grad_()
     b = torch.randn(n, device="cuda", requires_grad=True) if n == 3 else None
     g = torch.randn(m, n, device="cuda") * gradient_scale
@@ -84,7 +83,8 @@ def reference_project(messages, weights, bias):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("m,channels", [(0, 32), (17, 33), (513, 128), (4097, 512)])
 @pytest.mark.parametrize("activation_grad", [False, True])
-def test_combined_skinny_matches_double(m, channels, activation_grad):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_combined_skinny_matches_double(m, channels, activation_grad, dtype):
     from fairchem.core.frozen_hip.skinny import skinny_project
 
     torch.manual_seed(31)
@@ -93,7 +93,7 @@ def test_combined_skinny_matches_double(m, channels, activation_grad):
         9,
         channels,
         device="cuda",
-        dtype=torch.float16,
+        dtype=dtype,
         requires_grad=activation_grad,
     )
     weights = tuple(

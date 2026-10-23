@@ -180,3 +180,19 @@ def test_second_convolution_preserves_large_finite_outputs():
     y.mean().backward()
     assert torch.isfinite(x.grad).all()
     assert torch.isfinite(layer.weight.grad).all()
+
+
+def test_scaled_edge_linear_handles_large_activations_and_backward_operands():
+    from fairchem.core.frozen_hip.edge_precision import half_linear
+
+    x = torch.full((256, 16), 2.0**17, device="cuda", requires_grad=True)
+    w = torch.full((32, 16), 0.25, device="cuda", requires_grad=True)
+    expected = torch.nn.functional.linear(x, w)
+    gradient = torch.full_like(expected, 2.0**17)
+    reference = torch.autograd.grad(expected, (x, w), gradient)
+    actual = half_linear(x, w, out32=True)
+    grads = torch.autograd.grad(actual, (x, w), gradient)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for value, ref in zip(grads, reference, strict=True):
+        assert torch.isfinite(value).all()
+        torch.testing.assert_close(value, ref, rtol=0, atol=0)

@@ -8,7 +8,22 @@ import pytest
 import torch
 
 from fairchem.core.frozen_hip.edge_precision import half_linear
-from fairchem.core.frozen_hip.loss_scaling import scaled_update
+from fairchem.core.frozen_hip.loss_scaling import restore_loss_scale, scaled_update
+
+
+def test_precision_recovery_resets_scale_once_without_mutating_checkpoint():
+    original = torch.amp.GradScaler("cpu", init_scale=1, growth_interval=2000)
+    checkpoint = original.state_dict()
+    scaler = torch.amp.GradScaler("cpu")
+    restore_loss_scale(scaler, checkpoint, initial_scale=1024)
+    assert scaler.get_scale() == 1024
+    assert scaler.state_dict()["_growth_tracker"] == 0
+    assert checkpoint["scale"] == 1
+    saved = scaler.state_dict()
+    saved.update(scale=2048, _growth_tracker=37)
+    restore_loss_scale(scaler, saved)
+    assert scaler.get_scale() == 2048
+    assert scaler.state_dict()["_growth_tracker"] == 37
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

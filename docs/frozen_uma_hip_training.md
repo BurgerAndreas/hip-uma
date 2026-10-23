@@ -844,9 +844,12 @@ and `LOSS_SCALE=1024` through the allocation runner. Enable
 `DYNAMIC_LOSS_SCALE=1` for the qualified FP16 configuration. The default head
 precision remains FP32.
 
-Radial gathering writes FP16 directly. The second SO2 convolution keeps
-FP32 outputs from FP16 matrix operands. Its inverse-rotation gradients retain
-FP32. Other inverse-rotation gradients preserve their input dtype. FP16-output
+Radial gathering writes FP16 directly. Both SO2 convolutions keep FP32 outputs.
+Their matrix products use FP16 operands with power-of-two scaling in forward
+and backward. This protects learned message amplitudes and backward operands
+from FP16 range overflow. Scaling does not clip activations or gradients.
+Inverse-rotation gradients retain FP32 when their inputs use FP32.
+Other inverse-rotation gradients preserve their input dtype. FP16-output
 linear operations use the vendor bias epilogue.
 Normalization statistics, node accumulation, the final thin projection,
 Cartesian outputs, Coulomb terms, and losses retain FP32. Parameters, parameter
@@ -1282,6 +1285,17 @@ consecutive rejected attempts stop training. Checkpoints preserve scaler state
 and the rejected-attempt count, named `skipped_updates` in logs. The allocation
 wrapper also exposes `LOSS_SCALE_GROWTH_INTERVAL`. Manual CUDA graphs remain
 disabled for this configuration.
+
+Longer runs also exceeded FP16 range in the first SO2 convolution.
+Replays from two stopped checkpoints produced finite FP32 reference gradients.
+Both SO2 convolutions now retain FP32 outputs. Power-of-two operand scaling
+also protects their forward and backward matrix inputs before FP16 conversion.
+Checkpoints record `edge_range_scaling`. When resuming an older precision policy,
+the trainer resets the loss scale once to the configured initial value.
+It preserves the optimizer, parameters, successful step count, and learning-rate
+schedule. Subsequent resumes restore the saved scale and growth counter.
+After repeated failures, `terminal-overflow.pt` retains the batch, model state,
+and random states from the failed attempt for exact numerical replay.
 
 Scaling also protects small gradients. On the saved conditioned batch, scale 1
 changed the gradient norm by 19.5% against FP32. Scale 1,024 changed it by 0.06%.

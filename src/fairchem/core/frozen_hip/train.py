@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader
 
 from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter, feature_namespace
 from fairchem.core.frozen_hip.data import HessianStream
-from fairchem.core.frozen_hip.loss_scaling import scaled_update
+from fairchem.core.frozen_hip.loss_scaling import restore_loss_scale, scaled_update
 from fairchem.core.frozen_hip.losses import structure_block_rmse, structure_mae
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
 from fairchem.core.frozen_hip.packed import (
@@ -474,7 +474,27 @@ def main():
             if state.get("dynamic_loss_scale", False) != args.dynamic_loss_scale:
                 raise ValueError("Resume requires the same loss scaling policy")
             if args.dynamic_loss_scale:
-                scaler.load_state_dict(state["grad_scaler"])
+                reset_scale = getattr(
+                    head, "edge_range_scaling", False
+                ) and not state.get("edge_range_scaling", False)
+                restore_loss_scale(
+                    scaler,
+                    state["grad_scaler"],
+                    initial_scale=args.loss_scale if reset_scale else None,
+                )
+                if reset_scale and rank == 0:
+                    print(
+                        json.dumps(
+                            dict(
+                                event="precision_recovery",
+                                step=state["step"],
+                                previous_scale=state["grad_scaler"]["scale"],
+                                loss_scale=args.loss_scale,
+                                edge_range_scaling=True,
+                            )
+                        ),
+                        flush=True,
+                    )
             skipped_updates = state.get("skipped_updates", 0)
             optimizer.load_state_dict(state["optimizer"])
             if any(
@@ -808,6 +828,7 @@ def main():
             "cuda_graphs": args.cuda_graphs,
             "dataset_revision": args.dataset_revision,
             "head_precision": args.head_precision,
+            "edge_range_scaling": getattr(head, "edge_range_scaling", False),
             "translation_projection": args.translation_projection,
             "head_experts": args.head_experts,
             "head_charge_spin": args.head_charge_spin,
@@ -1064,6 +1085,7 @@ def main():
             diagnostic_rng = (
                 (torch.get_rng_state(), torch.cuda.get_rng_state())
                 if args.diagnose_gradients
+                or (args.dynamic_loss_scale and consecutive_overflows >= 15)
                 else None
             )
             batch_losses = []
@@ -1207,6 +1229,20 @@ def main():
                         )
                         print(json.dumps(event), flush=True)
                         if consecutive_overflows >= 16 or old_scale < 1e-6:
+                            # Retain the exact failed attempt for a numerical replay.
+                            # Ordinary AMP retries need no extra RNG synchronization.
+                            if diagnostic_rng is not None:
+                                torch.save(
+                                    dict(
+                                        head=head.state_dict(),
+                                        batches=host_batches,
+                                        cpu_rng=diagnostic_rng[0],
+                                        cuda_rng=diagnostic_rng[1],
+                                        count=local_count,
+                                        step=step,
+                                    ),
+                                    args.output / "terminal-overflow.pt",
+                                )
                             raise FloatingPointError(
                                 "Repeated nonfinite gradients at reduced loss scale"
                             )

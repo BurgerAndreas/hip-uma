@@ -5,6 +5,14 @@ from __future__ import annotations
 import torch
 
 
+def restore_loss_scale(scaler, state, *, initial_scale=None):
+    """Restore AMP state, optionally resetting a scale after a precision fix."""
+    state = dict(state)
+    if initial_scale is not None:
+        state.update(scale=initial_scale, _growth_tracker=0)
+    scaler.load_state_dict(state)
+
+
 def scaled_update(optimizer, scaler, parameters, *, max_norm=10.0):
     """Unscale once, clip FP32 gradients, and reject a nonfinite update.
 
