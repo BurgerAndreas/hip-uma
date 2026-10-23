@@ -138,7 +138,7 @@ def parse_args():
     p.add_argument("--fused-scatter", action="store_true")
     p.add_argument("--fused-wigner", action="store_true")
     p.add_argument("--fused-radial", action="store_true")
-    p.add_argument("--radial-tile", type=int, choices=(64, 128, 256), default=64)
+    p.add_argument("--radial-tile", type=int, choices=(64, 128, 256, 512), default=64)
     p.add_argument("--skinny-readout", action="store_true")
     p.add_argument("--tuned-edge-kernels", action="store_true")
     p.add_argument("--allow-fp16-cache", action="store_true")

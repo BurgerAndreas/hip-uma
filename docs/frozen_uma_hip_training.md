@@ -1214,6 +1214,8 @@ indices within each geometry. All node reductions stay FP32. Wide edge offsets
 use 64-bit arithmetic. These options require `--head-precision fp16-edge`.
 
 `--radial-tile 256` now applies to the mixed-precision radial kernels as well.
+Heads with at least 256 channels can also benchmark `--radial-tile 512`.
+This option preserves FP32 products and keeps four warps in the FP16 kernels.
 Measure the full update before selecting these options. A faster isolated
 kernel does not guarantee a faster complete training step.
 
@@ -1251,6 +1253,9 @@ Capture and warmup retain the current nondefault training stream. This avoids
 cross-stream reuse of compiled backward metadata during later eager updates.
 Default-stream callers use an explicit side stream. Stress checks alternate
 captured batches and 350-atom eager batches with all head parameters trainable.
+Keep manual capture disabled for large conditioned heads until the exact runtime
+passes maximum-size checks. One conditioned stress case still failed after the
+stream fix. The qualified production configuration disables manual capture.
 
 A resumed checkpoint can precede an interrupted validation. At a scheduled
 validation step, training checks for a complete record from the exact fixed

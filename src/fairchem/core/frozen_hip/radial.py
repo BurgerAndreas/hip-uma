@@ -21,8 +21,8 @@ _KERNEL_CONFIG = {"channel_tile": 64}
 
 def configure_radial_tile(tile):
     """Select an FP32 channel tile without changing tensor layouts or weights."""
-    if tile not in (64, 128, 256):
-        raise ValueError("Radial channel tile must be 64, 128, or 256")
+    if tile not in (64, 128, 256, 512):
+        raise ValueError("Radial channel tile must be 64, 128, 256, or 512")
     _KERNEL_CONFIG["channel_tile"] = tile
 
 
