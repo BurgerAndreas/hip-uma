@@ -196,3 +196,21 @@ def test_scaled_edge_linear_handles_large_activations_and_backward_operands():
     for value, ref in zip(grads, reference, strict=True):
         assert torch.isfinite(value).all()
         torch.testing.assert_close(value, ref, rtol=0, atol=0)
+
+
+def test_scaled_edge_linear_supports_activation_checkpoint_recomputation():
+    from torch.utils.checkpoint import checkpoint
+
+    from fairchem.core.frozen_hip.edge_precision import half_linear
+
+    torch.manual_seed(31)
+    x = torch.randn(257, 16, device="cuda", requires_grad=True)
+    w = torch.randn(32, 16, device="cuda", requires_grad=True)
+    expected = half_linear(x, w, out32=True)
+    reference = torch.autograd.grad(expected.square().mean(), (x, w))
+    actual = checkpoint(
+        lambda value: half_linear(value, w, out32=True), x, use_reentrant=False
+    )
+    gradients = torch.autograd.grad(actual.square().mean(), (x, w))
+    for value, ref in zip(gradients, reference, strict=True):
+        torch.testing.assert_close(value, ref, rtol=0, atol=0)

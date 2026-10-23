@@ -62,10 +62,11 @@ class HalfLinear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g):
-        x, w = ctx.saved_tensors[:2]
+        saved = ctx.saved_tensors
+        x, w = saved[:2]
         g = g.reshape(-1, w.shape[0])
         if ctx.out32:
-            sx, sw = ctx.saved_tensors[2:]
+            sx, sw = saved[2:]
             gh, sg = quantize(g)
             dx = (
                 (half_mm_float_output(gh, w) * (sg * sw)).reshape(ctx.shape)
