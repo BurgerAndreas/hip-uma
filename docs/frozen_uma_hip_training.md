@@ -840,10 +840,14 @@ MLP and scaled FP16 variants did not consistently improve full training speed.
 `--head-precision fp16-edge` uses FP16 hidden activations and tensor-core operands
 inside the edge networks. It requires fused rotations, fused radial operations,
 block SO2, projected readout, and segmented scatter. Use `HEAD_PRECISION=fp16-edge`
-and `LOSS_SCALE=1024` through the allocation runner. The default remains FP32.
+and `LOSS_SCALE=1024` through the allocation runner. Enable
+`DYNAMIC_LOSS_SCALE=1` for the qualified FP16 configuration. The default head
+precision remains FP32.
 
-Radial gathering and inverse-rotation gradients write FP16 directly, avoiding
-separate full-size casts. Linear bias addition uses the vendor GEMM epilogue.
+Radial gathering writes FP16 directly. The second SO2 convolution keeps
+FP32 outputs from FP16 matrix operands. Its inverse-rotation gradients retain
+FP32. Other inverse-rotation gradients preserve their input dtype. FP16-output
+linear operations use the vendor bias epilogue.
 Normalization statistics, node accumulation, the final thin projection,
 Cartesian outputs, Coulomb terms, and losses retain FP32. Parameters, parameter
 gradients, and AdamW state also retain FP32. Long weight-gradient reductions
@@ -1258,10 +1262,53 @@ passes maximum-size checks. One conditioned stress case still failed after the
 stream fix. The qualified production configuration disables manual capture.
 
 A full-data FP16 trial with fixed loss scale 1024 and learning rate 0.003
-produced nonfinite gradients after more than 6,100 updates. Its short accuracy
-and memory checks passed. These checks do not establish training stability.
-Keep long runs blocked until their full-data gradient checks pass. Diagnose the
-failing batch before selecting adaptive scaling or another precision policy.
+produced nonfinite gradients after more than 6,100 updates. A second trial
+captured the failure at update 6,716. The batch contained 35 geometries with
+73 atoms each. Coordinates, features, and targets remained finite.
+
+The second SO2 convolution first produced infinite FP16 outputs from finite
+inputs with magnitude 2,168. Normalization then produced NaNs. Loss scales
+from 1 through 1,024 all failed on this saved batch. The FP32 reference stayed
+finite. FP32 convolution outputs fixed the forward failure while retaining
+FP16 matrix operands and FP32 accumulation. Inverse-rotation gradients now
+preserve the FP32 message dtype. The corrected loss was 0.382434994; the FP32
+reference was 0.382435083. A saved conditioned-head failure also became finite.
+
+Use `--dynamic-loss-scale --loss-scale 1024` for training. The scaler doubles
+after 2,000 successful updates. It halves after a rejected update and resets
+the growth counter. The trainer retries the same logical batch. Only successful
+optimizer updates advance the step count and learning-rate schedule. Sixteen
+consecutive rejected attempts stop training. Checkpoints preserve scaler state
+and the rejected-attempt count, named `skipped_updates` in logs. The allocation
+wrapper also exposes `LOSS_SCALE_GROWTH_INTERVAL`. Manual CUDA graphs remain
+disabled for this configuration.
+
+Scaling also protects small gradients. On the saved conditioned batch, scale 1
+changed the gradient norm by 19.5% against FP32. Scale 1,024 changed it by 0.06%.
+Reducing the fixed scale therefore did not provide an adequate solution.
+
+The corrected source passed 101 CPU tests and 51 GPU test cases. The CPU suite
+skipped 33 GPU cases. Maximum-size stress tests passed 100 large updates and
+50 smaller updates for each architecture. They used four 350-atom geometries
+for one block and three for two blocks. Peak allocation stayed below 47.5 GB.
+Checkpoint recovery passed from update 2,000 to 2,400.
+
+All three architectures then completed 12,000 full-data updates at learning
+rate 0.003, zero decay, and Block RMSE. No update required rejection. The final
+loss scale reached 65,536. Peak allocation reached 48.7 GB for one block and
+50.8 GB for two blocks. The final 1,500-update windows averaged 60.9 ms,
+88.9 ms, and 93.0 ms for one block, two blocks, and conditioned two blocks.
+These timings use the full-data sampler and its variable molecular sizes.
+
+A paired 512-geometry cache diagnostic found a maximum projected-Hessian
+perturbation of 0.0347%. Feature quantization changed eigenvalue MAE by 0.00953%,
+Hessian MAE by -0.000953%, and Hessian RMSE by 0.00194%. Mean absolute cosine
+changed by -0.000779. Almost all of that mean change came from modes whose
+separation was small relative to the matrix perturbation. The 298 geometries
+with separation above that perturbation had mean cosine change +0.00000535.
+The paired mean's descriptive 95% interval included zero. The qualification
+records this sensitivity and retains every geometry in the primary metrics.
+These diagnostics do not establish complete-run accuracy equivalence.
 
 A resumed checkpoint can precede an interrupted validation. At a scheduled
 validation step, training checks for a complete record from the exact fixed
