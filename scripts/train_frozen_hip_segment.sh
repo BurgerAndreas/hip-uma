@@ -130,6 +130,10 @@ if [[ "${TRANSLATION_PROJECTION:-0}" == 1 ]]; then args+=(--translation-projecti
 if [[ "${HEAD_CHARGE_SPIN:-0}" == 1 ]]; then args+=(--head-charge-spin); fi
 if [[ -n "${HEAD_EXPERTS:-}" ]]; then args+=(--head-experts "$HEAD_EXPERTS"); fi
 if [[ -n "${LOSS_SCALE:-}" ]]; then args+=(--loss-scale "$LOSS_SCALE"); fi
+if [[ "${DYNAMIC_LOSS_SCALE:-0}" == 1 ]]; then args+=(--dynamic-loss-scale); fi
+if [[ -n "${LOSS_SCALE_GROWTH_INTERVAL:-}" ]]; then
+    args+=(--loss-scale-growth-interval "$LOSS_SCALE_GROWTH_INTERVAL")
+fi
 if [[ "${PACKED_WINDOW_PREFETCH:-0}" == 1 ]]; then args+=(--packed-window-prefetch); fi
 if [[ -n "${PACKED_WINDOW_MEMORY_GB:-}" ]]; then
     args+=(--packed-window-memory-gb "$PACKED_WINDOW_MEMORY_GB")

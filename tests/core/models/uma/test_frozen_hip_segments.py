@@ -396,3 +396,20 @@ def test_execution_options_survive_continuation(allocation, enabled):
         assert (flag in args) == enabled
     assert args[args.index("--compile-mode") + 1] == "max-autotune-no-cudagraphs"
     assert "--export=ALL" in read_lines(run / "submissions.jsonl")[0]["args"]
+
+
+def test_adaptive_loss_scaling_reaches_the_trainer(allocation):
+    run, env = allocation
+    result = invoke(
+        {
+            **env,
+            "DYNAMIC_LOSS_SCALE": "1",
+            "LOSS_SCALE": "1024",
+            "LOSS_SCALE_GROWTH_INTERVAL": "2000",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    args = json.loads((run / "arguments.json").read_text())
+    assert "--dynamic-loss-scale" in args
+    assert args[args.index("--loss-scale") + 1] == "1024"
+    assert args[args.index("--loss-scale-growth-interval") + 1] == "2000"

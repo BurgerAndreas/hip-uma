@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 
 from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter, feature_namespace
 from fairchem.core.frozen_hip.data import HessianStream
+from fairchem.core.frozen_hip.loss_scaling import scaled_update
 from fairchem.core.frozen_hip.losses import structure_block_rmse, structure_mae
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
 from fairchem.core.frozen_hip.packed import (
@@ -114,6 +115,11 @@ def parse_args():
         default="fp32",
     )
     p.add_argument("--loss-scale", type=float)
+    p.add_argument("--dynamic-loss-scale", action="store_true")
+    p.add_argument("--loss-scale-growth-interval", type=int, default=2000)
+    p.add_argument("--diagnose-gradients", action="store_true")
+    p.add_argument("--replay-gradients", type=Path)
+    p.add_argument("--benchmark-updates", type=int, default=0)
     p.add_argument(
         "--checkpoint-edges",
         type=int,
@@ -164,6 +170,12 @@ def parse_args():
         args.loss_scale = 1024.0 if args.head_precision == "fp16-edge" else 1.0
     if not math.isfinite(args.loss_scale) or args.loss_scale <= 0:
         p.error("Loss scale must be finite and positive")
+    if args.loss_scale_growth_interval < 1:
+        p.error("Loss scale growth interval must be positive")
+    if args.dynamic_loss_scale and args.cuda_graphs:
+        p.error("Dynamic loss scaling requires CUDA graphs disabled")
+    if args.benchmark_updates and (not args.benchmark or args.benchmark_updates < 1):
+        p.error("Benchmark update limit requires benchmark mode and a positive limit")
     if args.head_precision == "fp16-edge" and not all(
         (
             args.fused_rotations,
@@ -396,6 +408,14 @@ def main():
     optimizer = torch.optim.AdamW(
         head.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True
     )
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        init_scale=args.loss_scale,
+        growth_interval=args.loss_scale_growth_interval,
+        enabled=args.dynamic_loss_scale,
+    )
+    skipped_updates = 0
+    consecutive_overflows = 0
     initial_head_hash = parameter_hash(head)
     step = 0
     resume = (
@@ -451,6 +471,11 @@ def main():
         ):
             raise ValueError("Checkpoint step target differs from this experiment")
         if not args.eval_only:
+            if state.get("dynamic_loss_scale", False) != args.dynamic_loss_scale:
+                raise ValueError("Resume requires the same loss scaling policy")
+            if args.dynamic_loss_scale:
+                scaler.load_state_dict(state["grad_scaler"])
+            skipped_updates = state.get("skipped_updates", 0)
             optimizer.load_state_dict(state["optimizer"])
             if any(
                 group["weight_decay"] != args.weight_decay
@@ -709,6 +734,45 @@ def main():
             **({"mass_weighted": True} if args.loss == "mass-block-rmse" else {}),
         )
 
+    if args.replay_gradients:
+        if world != 1:
+            raise ValueError("Gradient replay requires one GPU")
+        state = torch.load(
+            args.replay_gradients, map_location=device, weights_only=False
+        )
+        head.load_state_dict(state["head"])
+        reports = []
+        for scale in (1024.0, 256.0, 64.0, 16.0, 1.0):
+            optimizer.zero_grad(set_to_none=True)
+            torch.set_rng_state(state["cpu_rng"].cpu())
+            torch.cuda.set_rng_state(state["cuda_rng"].cpu())
+            losses = []
+            for data in state["batches"]:
+                loss = training_loss(data)
+                losses.append(float(loss.detach()))
+                (loss * (len(data.hip_sizes) * scale / state["count"])).backward()
+            gradients = {
+                name: p.grad / scale
+                for name, p in head.named_parameters()
+                if p.grad is not None
+            }
+            bad = [name for name, g in gradients.items() if not torch.isfinite(g).all()]
+            report = dict(
+                scale=scale,
+                head_precision=args.head_precision,
+                losses=losses,
+                nonfinite_parameters=bad,
+                norm=float(
+                    torch.linalg.vector_norm(
+                        torch.stack([g.norm() for g in gradients.values()])
+                    )
+                ),
+            )
+            reports.append(report)
+            print(json.dumps({"event": "gradient_replay", **report}), flush=True)
+        (args.output / "gradient-replay.json").write_text(json.dumps(reports, indent=2))
+        return
+
     graph_runner = None
     if args.cuda_graphs:
         if world != 1 or args.head_experts or args.profile_steps:
@@ -747,6 +811,9 @@ def main():
             "head_experts": args.head_experts,
             "head_charge_spin": args.head_charge_spin,
             "loss_scale": args.loss_scale,
+            "dynamic_loss_scale": args.dynamic_loss_scale,
+            "grad_scaler": scaler.state_dict(),
+            "skipped_updates": skipped_updates,
             "tf32": args.tf32,
             "backbone_precision": args.backbone_precision,
             "backbone_graph_version": args.backbone_graph_version,
@@ -960,7 +1027,11 @@ def main():
             if not recorded[0]:
                 evaluate()
                 window = time.monotonic()
-        while not args.eval_only and step < args.steps:
+        while (
+            not args.eval_only
+            and step < args.steps
+            and (not args.benchmark_updates or step < args.benchmark_updates)
+        ):
             if time.monotonic() - started >= args.duration:
                 stopping = True
             if (
@@ -986,6 +1057,14 @@ def main():
                 count = torch.tensor(local_count, device=device, dtype=torch.float32)
                 dist.all_reduce(count)
             optimizer.zero_grad(set_to_none=True)
+            diagnostic_rng = (
+                (torch.get_rng_state(), torch.cuda.get_rng_state())
+                if args.diagnose_gradients
+                else None
+            )
+            batch_losses = []
+            update_loss = metrics[0].new_zeros(())
+            update_counts = [0, 0, 0, 0]
             for micro_index, host_data in enumerate(host_batches):
                 with phase("device_transfer"):
                     data = host_data if args.device_prefetch else move(host_data)
@@ -996,11 +1075,11 @@ def main():
                     else None
                 )
                 if graph_loss is not None:
-                    metrics[0].add_(graph_loss, alpha=b)
-                    host_metrics[0] += b
-                    host_metrics[1] += sum(data.hip_sizes)
-                    host_metrics[2] += b
-                    host_metrics[3] += 1
+                    update_loss.add_(graph_loss, alpha=b)
+                    update_counts[0] += b
+                    update_counts[1] += sum(data.hip_sizes)
+                    update_counts[2] += b
+                    update_counts[3] += 1
                     host_batches[micro_index] = None
                     continue
                 # Only the last microbatch synchronizes gradients. Every molecule
@@ -1048,35 +1127,93 @@ def main():
                                 ),
                             )
                     with phase("head_backward"):
-                        (loss * (b * world * args.loss_scale / count)).backward()
+                        weighted_loss = loss * (b * world / count)
+                        if args.dynamic_loss_scale:
+                            scaler.scale(weighted_loss).backward()
+                        else:
+                            (weighted_loss * args.loss_scale).backward()
                 with phase("batch_metrics"):
-                    metrics[0].add_(loss.detach(), alpha=b)
-                    host_metrics[0] += b
-                    host_metrics[1] += sum(data.hip_sizes)
-                    host_metrics[2] += b if hasattr(data, "hip_features") else 0
-                    host_metrics[3] += 1
-                host_batches[micro_index] = None
+                    update_loss.add_(loss.detach(), alpha=b)
+                    update_counts[0] += b
+                    update_counts[1] += sum(data.hip_sizes)
+                    update_counts[2] += b if hasattr(data, "hip_features") else 0
+                    update_counts[3] += 1
+                if args.diagnose_gradients:
+                    batch_losses.append(loss.detach())
+                else:
+                    host_batches[micro_index] = None
                 del prediction, loss, data, host_data
-            if args.loss_scale != 1.0:
-                torch._foreach_div_(
-                    [p.grad for p in head.parameters() if p.grad is not None],
-                    args.loss_scale,
-                )
-            with phase("grad_clip"):
-                norm = torch.nn.utils.clip_grad_norm_(
-                    head.parameters(),
-                    max_norm=10.0,
-                    error_if_nonfinite=not args.async_grad_check,
-                )
-                if args.async_grad_check:
-                    torch._assert_async(torch.isfinite(norm), "Nonfinite HIP gradient")
             warmup = min(1.0, (step + 1) / 500)
             progress = max(0.0, (step - 500) / max(1, args.steps - 500))
             lr = args.lr * warmup * (0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2)
             for group in optimizer.param_groups:
                 group["lr"] = lr
+            if not args.dynamic_loss_scale and args.loss_scale != 1.0:
+                torch._foreach_div_(
+                    [p.grad for p in head.parameters() if p.grad is not None],
+                    args.loss_scale,
+                )
+            with phase("grad_clip"):
+                if args.dynamic_loss_scale:
+                    norm, finite = scaled_update(optimizer, scaler, head.parameters())
+                else:
+                    norm = torch.nn.utils.clip_grad_norm_(
+                        head.parameters(),
+                        max_norm=10.0,
+                        error_if_nonfinite=not (
+                            args.diagnose_gradients or args.async_grad_check
+                        ),
+                    )
+                if args.dynamic_loss_scale or args.diagnose_gradients:
+                    finite = bool(torch.isfinite(norm))
+                    if not finite:
+                        if (
+                            args.diagnose_gradients
+                            and not (args.output / "overflow.pt").exists()
+                        ):
+                            torch.save(
+                                dict(
+                                    head=head.state_dict(),
+                                    batches=host_batches,
+                                    cpu_rng=diagnostic_rng[0],
+                                    cuda_rng=diagnostic_rng[1],
+                                    count=local_count,
+                                    step=step,
+                                    losses=[float(v) for v in batch_losses],
+                                ),
+                                args.output / "overflow.pt",
+                            )
+                        if not args.dynamic_loss_scale:
+                            raise FloatingPointError(
+                                f"Nonfinite HIP gradient at update {step + 1}"
+                            )
+                        old_scale = scaler.get_scale() * 2
+                        skipped_updates += 1
+                        consecutive_overflows += 1
+                        event = dict(
+                            event="gradient_overflow",
+                            step=step,
+                            skipped_updates=skipped_updates,
+                            loss_scale=old_scale,
+                            next_loss_scale=old_scale * 0.5,
+                        )
+                        print(json.dumps(event), flush=True)
+                        if consecutive_overflows >= 16 or old_scale < 1e-6:
+                            raise FloatingPointError(
+                                "Repeated nonfinite gradients at reduced loss scale"
+                            )
+                        optimizer.zero_grad(set_to_none=True)
+                        del host_batches
+                        continue
+                elif args.async_grad_check:
+                    torch._assert_async(torch.isfinite(norm), "Nonfinite HIP gradient")
+            consecutive_overflows = 0
+            metrics[0].add_(update_loss)
+            host_metrics = [a + b for a, b in zip(host_metrics, update_counts)]
+            del host_batches
             with phase("optimizer_step"):
-                optimizer.step()
+                if not args.dynamic_loss_scale:
+                    optimizer.step()
             if profiler is not None:
                 profiler.step()
             step += 1
@@ -1100,6 +1237,10 @@ def main():
                         "mean_global_batch": values[1] / window_updates,
                         "mean_global_atoms": values[2] / window_updates,
                         "step": step,
+                        "loss_scale": scaler.get_scale()
+                        if args.dynamic_loss_scale
+                        else args.loss_scale,
+                        "skipped_updates": skipped_updates,
                         "cuda_graph_hits": graph_runner.hits if graph_runner else 0,
                         "cuda_graph_captures": graph_runner.captures
                         if graph_runner
