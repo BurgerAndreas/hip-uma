@@ -1297,6 +1297,16 @@ schedule. Subsequent resumes restore the saved scale and growth counter.
 After repeated failures, `terminal-overflow.pt` retains the batch, model state,
 and random states from the failed attempt for exact numerical replay.
 
+With FP32 edge outputs, a compiled wide-batch pass also produced NaNs.
+The captured microbatch contained eight 246-atom geometries. The same inputs
+and parameters stayed finite with eager execution and the FP32 reference.
+`--compile-edge-limit 393216` bounds compiled blocks and projected readouts
+by their directed edge count. Larger graphs use the same eager functions,
+including custom Triton kernels and scaled FP16 matrix operands.
+Logical batches, sample inclusion, and weighted gradient accumulation stay unchanged.
+Scaled linear backward unpacks saved tensors once, as checkpoint recomputation
+requires. The regression suite covers this recovery path.
+
 Scaling also protects small gradients. On the saved conditioned batch, scale 1
 changed the gradient norm by 19.5% against FP32. Scale 1,024 changed it by 0.06%.
 Reducing the fixed scale therefore did not provide an adequate solution.
