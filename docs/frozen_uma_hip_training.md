@@ -1341,3 +1341,40 @@ A resumed checkpoint can precede an interrupted validation. At a scheduled
 validation step, training checks for a complete record from the exact fixed
 cohort. It repeats missing validation before it advances the optimizer. A
 complete matching record prevents duplicate evaluation.
+
+### Fixed data order and restart contracts
+
+Training now uses a map-style loader with an explicit, versioned batch plan.
+`--data-seed` defaults to 7, independently of the model initialization seed.
+The plan freezes source identities, sample membership, source windows, rank
+layout, and logical batch settings. Workers materialize requests from that plan;
+worker count, prefetch depth, feature precision, and physical microbatch limits
+do not select samples. A canonical balanced sample order also remains unchanged
+when a separate run changes its logical batch limits.
+
+Checkpoints save the **consumed** epoch/window/batch cursor. Prefetched requests
+do not advance this cursor. Each successful optimizer update advances it once;
+a gradient overflow retries the same batch. Checkpoints include per-rank Python,
+NumPy, CPU, and CUDA RNG states. Random views use the data seed and absolute update
+number, so restarts and earlier evaluations cannot select another view.
+
+Monitoring and final validation keep separate immutable membership contracts.
+Validation uses a fixed batch policy, zero loader workers, and an isolated random
+stream. Each result records its ordered sample fingerprint. Validation restores
+the training RNG state even when evaluation raises an error. Incomplete final
+labels may become complete only for the already declared sample IDs.
+
+An inventory, membership, seed, logical batch policy, or rank-layout change raises
+an error on resume. Automatic training-inventory refresh is disabled. Prepare a
+new immutable release to change a split. Different intentional splits retain
+separate contracts; they do not become comparable merely by sharing a seed.
+
+Legacy checkpoints do not contain their consumed cursor. Training refuses them
+by default. `--adopt-data-sequence` (`ADOPT_DATA_SEQUENCE=1` in the allocation
+wrapper) explicitly moves to the new plan at the saved update number. This
+one-time operation plans metadata up to that update without replaying features
+or gradients. It records `legacy_prefix_unverified`; it cannot recover or repair
+past sample order. Later restarts use the saved cursor directly.
+
+The numerical GPU kernels can still produce floating-point differences.
+Deterministic sample order does not promise bitwise GPU weight reproducibility.

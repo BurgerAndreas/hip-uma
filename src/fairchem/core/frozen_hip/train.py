@@ -25,7 +25,6 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from fairchem.core.frozen_hip.cache import AsyncFeatureCacheWriter, feature_namespace
-from fairchem.core.frozen_hip.data import HessianStream
 from fairchem.core.frozen_hip.loss_scaling import restore_loss_scale, scaled_update
 from fairchem.core.frozen_hip.losses import structure_block_rmse, structure_mae
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
@@ -37,6 +36,18 @@ from fairchem.core.frozen_hip.packed import (
 )
 from fairchem.core.frozen_hip.precision import configure_head_precision
 from fairchem.core.frozen_hip.rotations import enable_fused_rotations
+from fairchem.core.frozen_hip.sequence import (
+    PackedSequence,
+    PlannedPackedDataset,
+    capture_rng,
+    restore_rng,
+    seed_rng,
+    seed_update,
+    pin_manifest,
+    pin_validation_order,
+    digest_json,
+    fixed_rng,
+)
 from fairchem.core.frozen_hip.validation import (
     EvaluationStream,
     append_evaluation,
@@ -108,6 +119,8 @@ def parse_args():
     p.add_argument("--translation-projection", action="store_true")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--data-seed", type=int, default=7)
+    p.add_argument("--adopt-data-sequence", action="store_true")
     p.add_argument("--code-revision")
     p.add_argument("--execution-mode", choices=("general",), default="general")
     p.add_argument(
@@ -158,7 +171,7 @@ def parse_args():
     p.add_argument("--segmented-scatter", action="store_true")
     p.add_argument("--async-grad-check", action="store_true")
     p.add_argument("--stop-file", type=Path)
-    p.add_argument("--refresh-data-every", type=int, default=2000)
+    p.add_argument("--refresh-data-every", type=int, default=0)
     args = p.parse_args()
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         p.error("--weight-decay must be finite and nonnegative")
@@ -200,6 +213,10 @@ def parse_args():
         p.error("FP16 feature caches require packed targets")
     if args.pack_features_fp16 and not (args.packed_data and args.fast_packed_loader):
         p.error("FP16 feature packing requires the fast packed loader")
+    if args.data_seed < 0:
+        p.error("Data seed must be nonnegative")
+    if args.refresh_data_every:
+        p.error("Fixed training sequences require an immutable data inventory")
     if args.threaded_prefetch and not args.device_prefetch:
         p.error("Threaded prefetch requires device prefetch")
     if args.prefetch_factor < 1:
@@ -253,6 +270,7 @@ def main():
         args.head_width_multiplier = evaluation_state.get("head_width_multiplier", 1)
         for key, default in (
             ("loss_name", "mse"),
+            ("data_seed", 7),
             ("translation_projection", False),
             ("head_experts", 0),
             ("head_charge_spin", False),
@@ -434,6 +452,7 @@ def main():
         if args.eval_only
         else args.resume or args.output / "latest.pt"
     )
+    state = None
     if resume.exists():
         state = (
             evaluation_state
@@ -539,47 +558,87 @@ def main():
 
     inventory = synchronized_inventory()
 
+    sequence = None
+    consumed_cursor = (0, 0, 0)
+    sequence_updates = step
+    sequence_prefix = None
+    legacy_prefix_unverified = False
+    last_batch_sha256 = None
+
+    if rank == 0:
+        pin_manifest(args.output, "monitor", cohort)
+        pin_manifest(args.output, "final", final_cohort)
+    if world > 1:
+        dist.barrier()
+
     def loader():
-        if args.packed_data:
-            stream = PackedHessianStream(
-                args.packed_data,
-                rank=rank,
-                world=world,
-                seed=args.seed + step,
-                max_batch=args.max_batch // world,
-                max_atoms=args.max_atoms // world,
-                pair_budget=args.microbatch_pairs,
-                logical_pair_budget=args.pair_budget,
-                markers=inventory,
-                backbone_sha256=frozen_hash,
-                backbone_precision=args.backbone_precision,
-                backbone_graph_version=args.backbone_graph_version,
-                fused_backbone=args.fused_backbone,
-                tf32=args.tf32,
-                grouped_mole=args.grouped_mole,
-                window_files=args.window_shards,
-                feature_cache=cache_root,
-                allow_fp16_cache=args.allow_fp16_cache,
-                pack_features_fp16=args.pack_features_fp16,
-                include_cache_metadata=not args.feature_cache_read_only,
-                fast_packing=args.fast_packed_loader,
-                prefetch_window=args.packed_window_prefetch,
-                window_memory_bytes=int(args.packed_window_memory_gb * 1024**3),
+        nonlocal \
+            sequence, \
+            consumed_cursor, \
+            sequence_prefix, \
+            legacy_prefix_unverified, \
+            last_batch_sha256
+        if not args.packed_data:
+            raise ValueError("Restartable training requires prepared packed data")
+        stream = PackedHessianStream(
+            args.packed_data,
+            rank=rank,
+            world=world,
+            seed=args.data_seed,
+            max_batch=args.max_batch // world,
+            max_atoms=args.max_atoms // world,
+            pair_budget=args.microbatch_pairs,
+            logical_pair_budget=args.pair_budget,
+            markers=inventory,
+            backbone_sha256=frozen_hash,
+            backbone_precision=args.backbone_precision,
+            backbone_graph_version=args.backbone_graph_version,
+            fused_backbone=args.fused_backbone,
+            tf32=args.tf32,
+            grouped_mole=args.grouped_mole,
+            feature_cache=cache_root,
+            allow_fp16_cache=args.allow_fp16_cache,
+            pack_features_fp16=args.pack_features_fp16,
+            include_cache_metadata=not args.feature_cache_read_only,
+            fast_packing=args.fast_packed_loader,
+            window_files=args.window_shards,
+            window_memory_bytes=int(args.packed_window_memory_gb * 1024**3),
+        )
+        sequence = PackedSequence(stream, seed=args.data_seed)
+        saved = state.get("training_sequences") if state is not None else None
+        if saved is not None:
+            if len(saved) != world:
+                raise ValueError("Resume requires the saved data rank topology")
+            sequence.validate_state(saved[rank])
+            if saved[rank]["updates"] != step:
+                raise ValueError("Training cursor and optimizer step differ")
+            sequence_prefix = saved[rank]["prefix_sha256"]
+            last_batch_sha256 = saved[rank].get("last_batch_sha256")
+            legacy_prefix_unverified = saved[rank].get(
+                "legacy_prefix_unverified", False
             )
-        else:
-            stream = HessianStream(
-                args.data,
-                rank=rank,
-                world=world,
-                seed=args.seed + step,
-                pair_budget=args.pair_budget,
-                microbatch_pairs=args.microbatch_pairs,
-                max_batch=args.max_batch // world,
-                max_atoms=args.max_atoms // world,
-                window_shards=args.window_shards,
-                split="train",
-                feature_cache=cache_root,
-                markers=inventory,
+        elif step:
+            if not args.adopt_data_sequence:
+                raise ValueError(
+                    "Legacy checkpoint has no data cursor; explicitly use --adopt-data-sequence once"
+                )
+            sequence.seek_updates(step)
+            legacy_prefix_unverified = True
+            if rank == 0:
+                print(
+                    json.dumps(
+                        dict(
+                            event="legacy_sequence_adoption",
+                            step=step,
+                            previous_order_unrecoverable=True,
+                        )
+                    ),
+                    flush=True,
+                )
+        consumed_cursor = sequence.cursor
+        if sequence_prefix is None:
+            sequence_prefix = digest_json(
+                dict(plan=sequence.plan_sha256, rank=rank, adopted_step=step)
             )
         kw = (
             {
@@ -591,15 +650,26 @@ def main():
             else {}
         )
         return DataLoader(
-            stream,
+            PlannedPackedDataset(stream),
+            sampler=sequence,
             batch_size=None,
             num_workers=args.workers,
             pin_memory=args.pin_memory,
+            generator=torch.Generator().manual_seed(args.data_seed),
             **kw,
         )
 
     train_loader = None if args.eval_only else loader()
     train_iter = iter(train_loader) if train_loader is not None else None
+    if not args.eval_only:
+        if state is not None and state.get("rng_states") is not None:
+            if len(state["rng_states"]) != world:
+                raise ValueError("Resume requires the saved RNG rank topology")
+            restore_rng(state["rng_states"][rank], device)
+        else:
+            seed_rng(args.data_seed)
+    attempt_rng = None
+    optimizer_in_progress = False
     stopping = False
 
     def stop_requested(*_):
@@ -818,13 +888,28 @@ def main():
         )
 
     def save():
-        if rank != 0 or args.benchmark:
+        if args.benchmark:
+            return
+        local_sequence = sequence.state(
+            consumed_cursor, sequence_updates, sequence_prefix
+        )
+        local_sequence["legacy_prefix_unverified"] = legacy_prefix_unverified
+        local_sequence["last_batch_sha256"] = last_batch_sha256
+        sequence_states, rng_states = [local_sequence], [capture_rng(device)]
+        if world > 1:
+            sequence_states, rng_states = [None] * world, [None] * world
+            dist.all_gather_object(sequence_states, local_sequence)
+            dist.all_gather_object(rng_states, capture_rng(device))
+        if rank != 0:
             return
         current_hash = parameter_hash(model.backbone)
         assert current_hash == frozen_hash
         assert all(p.grad is None for p in model.backbone.parameters())
         checkpoint = {
             "step": step,
+            "training_sequences": sequence_states,
+            "rng_states": rng_states,
+            "data_seed": args.data_seed,
             "target_steps": args.steps,
             "weight_decay": args.weight_decay,
             "initial_head_sha256": initial_head_hash,
@@ -907,12 +992,16 @@ def main():
             flush=True,
         )
 
-    def evaluate(*, final=False):
+    def evaluate_fixed(*, final=False):
         cohort = (
             load_manifest(args.final_validation_manifest)
             if final and args.final_validation_manifest
             else load_manifest(cohort_path)
         )
+        if rank == 0:
+            pin_manifest(args.output, "final" if final else "monitor", cohort)
+        if world > 1:
+            dist.barrier()
         if final and not cohort.get("complete", True):
             if rank == 0:
                 row = dict(
@@ -940,9 +1029,9 @@ def main():
             cohort,
             rank=rank,
             world=world,
-            max_batch=args.max_batch // world,
-            max_atoms=args.max_atoms // world,
-            pair_budget=args.microbatch_pairs,
+            max_batch=max(1, 32 // world),
+            max_atoms=max(1, 1280 // world),
+            pair_budget=196608,
         )
         val = torch.zeros(4, device=device, dtype=torch.float64)
         projected = torch.zeros(6, device=device, dtype=torch.float64)
@@ -951,13 +1040,9 @@ def main():
             val_loader = DataLoader(
                 stream,
                 batch_size=None,
-                num_workers=args.workers,
+                num_workers=0,
                 pin_memory=args.pin_memory,
-                **(
-                    {"multiprocessing_context": "spawn", "prefetch_factor": 2}
-                    if args.workers
-                    else {}
-                ),
+                generator=torch.Generator().manual_seed(args.data_seed),
             )
             for host_data in val_loader:
                 seen.extend(int(sid) for sid in host_data.sid)
@@ -998,7 +1083,12 @@ def main():
         projected_record = projected_metric_record(projected, cohort["samples"])
         values = val.cpu().tolist()
         if rank == 0:
+            order_hash = pin_validation_order(
+                args.output, "final" if final else "monitor", ids
+            )
             row = dict(
+                validation_order_sha256=order_hash,
+                validation_sequence_version=1,
                 event="final_evaluation" if final else "validation",
                 step=step,
                 loss_name=args.loss,
@@ -1023,6 +1113,10 @@ def main():
             append_evaluation(args.output / "evaluation.jsonl", row)
         model.train()
 
+    def evaluate(*, final=False):
+        with fixed_rng(args.data_seed, device):
+            return evaluate_fixed(final=final)
+
     if rank == 0:
         public_config = {k: v for k, v in vars(args).items() if not isinstance(v, Path)}
         public_config.update(
@@ -1037,6 +1131,13 @@ def main():
             validation_samples=cohort["samples"],
             validation_sample_ids_sha256=cohort["sample_ids_sha256"],
             available_shards_at_start=len(inventory),
+            training_samples=sequence.samples if sequence else None,
+            training_sample_ids_sha256=sequence.contract["training_sample_ids_sha256"]
+            if sequence
+            else None,
+            training_sequence_version=1,
+            training_sequence_sha256=sequence.plan_sha256 if sequence else None,
+            canonical_training_order_sha256=sequence.order_sha256 if sequence else None,
         )
         (args.output / "config.json").write_text(
             json.dumps(public_config, indent=2) + "\n"
@@ -1088,6 +1189,15 @@ def main():
                     next(train_iter) if retry_batches is None else retry_batches
                 )
                 retry_batches = None
+            if any(
+                int(data.hip_sequence_update) != sequence_updates
+                for data in host_batches
+            ):
+                raise ValueError("Training batches arrived outside the fixed sequence")
+            next_cursor = tuple(int(x) for x in host_batches[0].hip_sequence_after)
+            sample_ids = [int(sid) for data in host_batches for sid in data.sid]
+            seed_update(args.data_seed, step)
+            attempt_rng = capture_rng(device)
             local_count = sum(len(data.natoms) for data in host_batches)
             count = local_count
             if world > 1:
@@ -1193,7 +1303,9 @@ def main():
                 )
             with phase("grad_clip"):
                 if args.dynamic_loss_scale:
+                    optimizer_in_progress = True
                     norm, finite = scaled_update(optimizer, scaler, head.parameters())
+                    optimizer_in_progress = bool(torch.isfinite(norm))
                 else:
                     norm = torch.nn.utils.clip_grad_norm_(
                         head.parameters(),
@@ -1260,6 +1372,8 @@ def main():
                             )
                         optimizer.zero_grad(set_to_none=True)
                         retry_batches = host_batches
+                        restore_rng(attempt_rng, device)
+                        attempt_rng = None
                         del host_batches
                         continue
                 elif args.async_grad_check:
@@ -1270,10 +1384,17 @@ def main():
             del host_batches
             with phase("optimizer_step"):
                 if not args.dynamic_loss_scale:
+                    optimizer_in_progress = True
                     optimizer.step()
             if profiler is not None:
                 profiler.step()
             step += 1
+            consumed_cursor = next_cursor
+            sequence_updates += 1
+            sequence_prefix = digest_json([sequence_prefix, sample_ids])
+            last_batch_sha256 = digest_json(sample_ids)
+            attempt_rng = None
+            optimizer_in_progress = False
             window_updates += 1
             total_samples += local_count
             if step % args.log_every == 0:
@@ -1289,6 +1410,10 @@ def main():
                         "wall_time": time.time(),
                         "step_seconds": elapsed / window_updates,
                         "window_updates": window_updates,
+                        "training_sequence_sha256": sequence.plan_sha256,
+                        "training_sequence_prefix_sha256": sequence_prefix,
+                        "training_batch_sha256": last_batch_sha256,
+                        "training_next_cursor": list(consumed_cursor),
                         "mean_microbatches_per_gpu_step": values[4]
                         / (window_updates * world),
                         "mean_global_batch": values[1] / window_updates,
@@ -1354,7 +1479,9 @@ def main():
         # Stop the infinite loader before interpreter and CUDA teardown. Held-out
         # evaluation is bounded and uses the main process rather than abandoned
         # multiprocessing prefetch queues.
-        if not args.benchmark and not args.eval_only:
+        if not args.benchmark and not args.eval_only and not optimizer_in_progress:
+            if attempt_rng is not None:
+                restore_rng(attempt_rng, device)
             save()
         if (args.workers or args.device_prefetch) and train_iter is not None:
             try:
@@ -1381,6 +1508,7 @@ def main():
         state = load_last_head(head, args.output / "latest.pt", frozen_hash, device)
         step = state["step"]
         torch.backends.cuda.matmul.allow_tf32 = state.get("tf32", False)
+        args.data_seed = state.get("data_seed", 7)
         args.head_precision = state.get("head_precision", "fp32")
         args.translation_projection = state.get("translation_projection", False)
         args.head_experts = state.get("head_experts", 0)

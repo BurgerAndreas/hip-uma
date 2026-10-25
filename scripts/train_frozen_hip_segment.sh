@@ -108,9 +108,10 @@ args=(
     --backbone-graph-version 4 --grouped-mole --fused-backbone
     --fused-rotations --block-so2 --projected-readout --compile-head
     --checkpoint-every "${CHECKPOINT_EVERY:-5000}" --validate-every "${VALIDATE_EVERY:-400000}" --log-every 100
-    --refresh-data-every 0
+    --refresh-data-every 0 --data-seed "${DATA_SEED:-7}"
     --stop-file "$RUN_ROOT/STOP"
 )
+if [[ "${ADOPT_DATA_SEQUENCE:-0}" == 1 ]]; then args+=(--adopt-data-sequence); fi
 if [[ -n "${VALIDATION_MANIFEST:-}" ]]; then args+=(--validation-manifest "$VALIDATION_MANIFEST"); fi
 if [[ -n "${FINAL_VALIDATION_MANIFEST:-}" ]]; then args+=(--final-validation-manifest "$FINAL_VALIDATION_MANIFEST"); fi
 if [[ -n "${DATASET_REVISION:-}" ]]; then args+=(--dataset-revision "$DATASET_REVISION"); fi

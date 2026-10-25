@@ -159,22 +159,47 @@ def make_packed_batch(
     return data
 
 
-def pack_cached_window(window, references, *, include_targets=True, feature_dtype=None):
-    """Gather cached rows once, retaining the original bundle grouping order."""
+def reference_groups(references, preserve_order=False):
+    """Keep contiguous source runs when the sampler requires exact sample order."""
+    if preserve_order:
+        groups = []
+        for source, row in references:
+            if not groups or groups[-1][0] != source:
+                groups.append((source, []))
+            groups[-1][1].append(row)
+        return groups
     grouped = {}
     for source, row in references:
         grouped.setdefault(source, []).append(row)
+    return list(grouped.items())
+
+
+def pack_cached_window(
+    window,
+    references,
+    *,
+    include_targets=True,
+    feature_dtype=None,
+    preserve_order=False,
+):
+    """Gather cached rows once, retaining the original bundle grouping order."""
+    grouped = reference_groups(references, preserve_order)
     if any(
         "features" not in window[source][0] or "_cache_meta" in window[source][1]
-        for source in grouped
+        for source, _ in grouped
     ):
-        data = pack_packed_window(window, references, include_targets=include_targets)
+        data = pack_packed_window(
+            window,
+            references,
+            include_targets=include_targets,
+            preserve_order=preserve_order,
+        )
         if feature_dtype == np.float16 and hasattr(data, "hip_features"):
             data.hip_features = data.hip_features.half()
         return data
     sizes, positions, cells, numbers, features = [], [], [], [], []
     pairs, diagonals, asymmetry, charge, spin, sid, scales = [], [], [], [], [], [], []
-    for source, rows in grouped.items():
+    for source, rows in grouped:
         values, header = window[source]
         for row in rows:
             lo, hi = values["atom_ptr"][row : row + 2]
@@ -235,13 +260,13 @@ def pack_cached_window(window, references, *, include_targets=True, feature_dtyp
     return data
 
 
-def pack_packed_window(window, references, *, include_targets=True):
+def pack_packed_window(
+    window, references, *, include_targets=True, preserve_order=False
+):
     """
     Mix bundle sizes before packing, while preserving every row's labels.
     """
-    grouped = {}
-    for source, row in references:
-        grouped.setdefault(source, []).append(row)
+    grouped = reference_groups(references, preserve_order)
     parts = [
         make_packed_batch(
             window[source][0],
@@ -250,7 +275,7 @@ def pack_packed_window(window, references, *, include_targets=True):
             window[source][1].get("_cache_meta"),
             include_targets=include_targets,
         )
-        for source, rows in grouped.items()
+        for source, rows in grouped
     ]
     if len(parts) == 1:
         return parts[0]
