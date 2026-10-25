@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
@@ -254,8 +255,25 @@ def test_training_failure_does_not_submit_another_successor(allocation):
 
 
 @pytest.mark.parametrize("sig", [signal.SIGUSR1, signal.SIGTERM])
-def test_signals_preserve_progress_without_blocking_scheduler_restarts(allocation, sig):
+@pytest.mark.parametrize("isolated", [False, True])
+def test_signals_preserve_progress_without_blocking_scheduler_restarts(
+    allocation, sig, isolated
+):
     run, env = allocation
+    if isolated:
+        launcher = SCRIPT.with_name("with_private_shm.sh")
+        if sys.platform != "linux":
+            pytest.skip("Linux namespaces are required")
+        probe = subprocess.run(
+            ["bash", str(launcher), "true"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if probe.returncode:
+            pytest.skip("User/mount namespaces are unavailable")
+        scripts = Path(env["CODE_ROOT"]) / "scripts"
+        scripts.mkdir()
+        shutil.copy2(launcher, scripts / launcher.name)
+        env["ISOLATE_LOADER_IPC"] = "1"
     reader, writer = os.pipe()
     if writer == 9:
         replacement = os.dup(writer)

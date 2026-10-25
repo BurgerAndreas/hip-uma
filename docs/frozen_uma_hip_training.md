@@ -1378,3 +1378,23 @@ past sample order. Later restarts use the saved cursor directly.
 
 The numerical GPU kernels can still produce floating-point differences.
 Deterministic sample order does not promise bitwise GPU weight reproducibility.
+
+### Multiprocessing shared-memory isolation
+
+Set `ISOLATE_LOADER_IPC=1` in the allocation wrapper to give each trainer a
+private shared-memory mount. Keep `LOADER_WORKERS=2` for parallel CPU loading.
+The launcher uses Linux user, mount, and IPC namespaces without host root
+privileges. It leaves the host shared-memory mount untouched. A failed namespace
+or mount setup stops the job; it never silently disables workers.
+
+Python spawn workers reopen named POSIX semaphores during startup. Missing
+semaphore files cause `SemLock._rebuild` to raise `FileNotFoundError` before
+dataset loading begins. Private shared memory prevents another allocation's
+cleanup from removing those files. This protection does not establish which
+process removed a semaphore in an earlier failed allocation.
+
+`HIP_SHM_SIZE` defaults to `16G`. This limit does not allocate that amount in
+advance; actual shared-memory use counts against the job's memory limit. The
+trainer and workers share the mount. The trainer keeps its PID, so checkpoint
+signals and successor handling retain their existing behavior. Batch plans,
+sample identities, RNG state, and checkpoint cursors do not depend on isolation.

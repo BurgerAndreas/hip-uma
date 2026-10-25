@@ -153,7 +153,13 @@ forward_signal() {
     kill -USR1 "$trainer_pid" 2>/dev/null || true
     wait "$trainer_pid"
 }
-"$PYTHON_BIN" -m fairchem.core.frozen_hip.train "${args[@]}" &
+trainer_launcher=()
+case "${ISOLATE_LOADER_IPC:-0}" in
+    0) ;;
+    1) trainer_launcher=(bash "$CODE_ROOT/scripts/with_private_shm.sh") ;;
+    *) echo "ISOLATE_LOADER_IPC must be 0 or 1." >&2; cancel_successor; exit 2 ;;
+esac
+"${trainer_launcher[@]}" "$PYTHON_BIN" -m fairchem.core.frozen_hip.train "${args[@]}" &
 trainer_pid=$!
 trap forward_signal USR1
 trap 'stop_continuation=1; forward_signal' TERM
