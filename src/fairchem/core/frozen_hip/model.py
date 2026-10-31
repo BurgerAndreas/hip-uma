@@ -95,6 +95,63 @@ class FrozenHIP(nn.Module):
         emb["node_embedding"] = emb["node_embedding"].float()
         return emb
 
+    @torch.no_grad()
+    def predict_hessian(
+        self,
+        data,
+        *,
+        chunk_edges=65536,
+        pair_cutoff=None,
+        output_format="dense",
+        precision="fp32",
+        project_translations=True,
+    ):
+        """
+        Predict one molecular Hessian with bounded edge activations.
+
+        Args:
+            data: One nonperiodic AtomicData molecule on the model device.
+            chunk_edges: Maximum directed candidate pairs per chunk.
+            pair_cutoff: Optional pair selection radius in angstroms.
+                This does not change the trained radial feature scale.
+            output_format: "dense" or "blocks" for symmetric block COO with
+                an implicit translation correction.
+            precision: Backbone feature precision, "fp32" or "fp16".
+            project_translations: Apply the translation sum rule.
+
+        Returns:
+            The Hessian tensor or HessianBlocks object, and directed pair count.
+        """
+        from fairchem.core.frozen_hip.streamed_head import predict
+        from fairchem.core.frozen_hip.wigner import enable_fused_wigner
+
+        if self.training:
+            raise ValueError("Chunked Hessians require eval mode")
+        if len(data.natoms) != 1 or bool(data.pbc.any()):
+            raise ValueError("Chunked Hessians require one nonperiodic molecule")
+        n = len(data.pos)
+        data.hip_sizes = [n]
+        data.hip_atom_ptr = torch.tensor([0, n], device=data.pos.device)
+        enable_fused_wigner(self.head)
+        if getattr(self.backbone, "_merged_composition", None) is not None:
+            self.backbone.on_predict_check(data)
+        previous = self.backbone.radius_pbc_version
+        if n > 1024 and previous == 4:
+            self.backbone.radius_pbc_version = 2
+        try:
+            emb = self.features(data, precision)
+            return predict(
+                self.head,
+                data,
+                emb,
+                chunk_edges=chunk_edges,
+                cutoff=pair_cutoff,
+                project=project_translations,
+                output_format=output_format,
+            )
+        finally:
+            self.backbone.radius_pbc_version = previous
+
     def forward(self, data):
         # Energy and force heads are deliberately absent. No backbone activations
         # are saved for backward, and only HIP parameters enter the optimizer.

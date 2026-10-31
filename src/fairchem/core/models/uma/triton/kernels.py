@@ -67,7 +67,7 @@ def node_to_edge_wigner_permute_kernel(
 
     Grid: (num_edges, num_c_blocks)
     """
-    edge_id = tl.program_id(0)
+    edge_id = tl.program_id(0).to(tl.int64)
     c_block_id = tl.program_id(1)
 
     # Channel vectorization with block offset
@@ -618,7 +618,7 @@ def node_to_edge_wigner_permute_bwd_dx_kernel(
 
     Grid: (num_edges,)
     """
-    edge_id = tl.program_id(0)
+    edge_id = tl.program_id(0).to(tl.int64)
 
     # Channel vectorization
     c_range = tl.arange(0, BLOCK_C)
@@ -1243,7 +1243,7 @@ def permute_wigner_inv_edge_to_node_kernel(
 
     Grid: (num_edges, num_c_blocks)
     """
-    edge_id = tl.program_id(0)
+    edge_id = tl.program_id(0).to(tl.int64)
     c_block_id = tl.program_id(1)
 
     c_start = c_block_id * BLOCK_C
@@ -1470,7 +1470,7 @@ def permute_wigner_inv_edge_to_node_bwd_dx_kernel(
 
     Grid: (num_edges, num_c_blocks)
     """
-    edge_id = tl.program_id(0)
+    edge_id = tl.program_id(0).to(tl.int64)
     c_block_id = tl.program_id(1)
 
     c_start = c_block_id * BLOCK_C
@@ -1632,7 +1632,7 @@ def permute_wigner_inv_edge_to_node_bwd_dw_kernel(
 
     Grid: (num_edges,)
     """
-    edge_id = tl.program_id(0)
+    edge_id = tl.program_id(0).to(tl.int64)
 
     c_range = tl.arange(0, C)
     c_mask = c_range < C

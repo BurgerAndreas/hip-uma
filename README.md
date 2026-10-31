@@ -4,6 +4,11 @@ This fork adds Hessian prediction support for UMA, following [Hessian Interatomi
 
 Example run: https://api.wandb.ai/links/andreas-burger/ckdi5mnn
 
+## Chunked and block-sparse Hessian inference
+
+See [chunked molecular HIP inference](docs/chunked_sparse_hip.md) for bounded pair
+processing, optional distance cutoffs, symmetric block output, and large-system support.
+
 ## HIP-UMA Checkpoints
 
 The final full-data models are hosted in the
@@ -417,7 +422,11 @@ from fairchem.core.datasets.common_structures import get_fcc_crystal_by_num_atom
 
 seed = np.random.randint(0, np.iinfo(np.int32).max, dtype=int)
 predictor = pretrained_mlip.get_predict_unit(
-    "uma-s-1p2", inference_settings="turbo", device="cuda", workers=8, seed=seed,
+    "uma-s-1p2",
+    inference_settings="turbo",
+    device="cuda",
+    workers=8,
+    seed=seed,
 )
 calc = FAIRChemCalculator(predictor, task_name="omat")
 
