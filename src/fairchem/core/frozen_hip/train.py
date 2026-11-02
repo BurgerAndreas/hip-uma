@@ -15,6 +15,7 @@ import json
 import math
 import os
 import signal
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -64,6 +65,7 @@ def parse_args():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--steps", type=int, default=200000)
     p.add_argument("--duration", type=float, default=13200)
+    p.add_argument("--python-switch-interval", type=float)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--compile-edge-limit", type=int, default=393216)
     p.add_argument("--fused-range-pack", action="store_true")
@@ -208,6 +210,11 @@ def parse_args():
         )
     if args.head_precision == "fp16-edge" and args.scaled_linear:
         p.error("FP16 edge mode cannot use adaptive scaled linear operations")
+    if args.python_switch_interval is not None and (
+        not math.isfinite(args.python_switch_interval)
+        or args.python_switch_interval <= 0
+    ):
+        p.error("Python switch interval must be finite and positive")
     if args.split_radial and args.head_precision != "fp16-edge":
         p.error("Split radial gradients require FP16 edge precision")
     if args.fused_range_pack and args.head_precision != "fp16-edge":
@@ -259,6 +266,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.python_switch_interval is not None:
+        sys.setswitchinterval(args.python_switch_interval)
     cohort_path = args.validation_manifest or args.data / "validation_10000.json"
     cohort = load_manifest(cohort_path)
     final_cohort = (
@@ -995,6 +1004,7 @@ def main():
             "loss_name": args.loss,
             "fused_range_pack": args.fused_range_pack,
             "split_radial": args.split_radial,
+            "python_switch_interval": args.python_switch_interval,
             "loss": (
                 "structure_mean_mse_eV2_Angstrom4"
                 if args.loss == "mse"
@@ -1339,7 +1349,7 @@ def main():
                 if args.dynamic_loss_scale:
                     optimizer_in_progress = True
                     norm, finite = scaled_update(optimizer, scaler, head.parameters())
-                    optimizer_in_progress = bool(torch.isfinite(norm))
+                    optimizer_in_progress = finite
                 else:
                     norm = torch.nn.utils.clip_grad_norm_(
                         head.parameters(),
@@ -1349,7 +1359,8 @@ def main():
                         ),
                     )
                 if args.dynamic_loss_scale or args.diagnose_gradients:
-                    finite = bool(torch.isfinite(norm))
+                    if not args.dynamic_loss_scale:
+                        finite = bool(torch.isfinite(norm))
                     if not finite:
                         if (
                             args.diagnose_gradients

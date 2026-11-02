@@ -130,3 +130,9 @@ The flag requires `--head-precision fp16-edge`.
 The segment wrapper accepts `SPLIT_RADIAL=1`.
 Checkpoint metadata records the flag for resumed training and evaluation.
 The path remains optional while complete training benchmarks qualify performance.
+
+The trainer also accepts `--python-switch-interval SECONDS` for controlled host scheduling tests.
+The segment wrapper accepts `PYTHON_SWITCH_INTERVAL=SECONDS`.
+The default retains the interpreter setting.
+AMP reuses the finite result from its update helper and avoids two duplicate GPU scalar reads.
+Overflow checks, loss scaling, retries, and checkpoint commit rules remain active.

@@ -111,6 +111,8 @@ def segmented_radial_dx(
     Radial coefficients and incoming gradients may use FP16. All products,
     reductions, and returned node gradients use FP32.
     """
+    if (gradient1 is None) != (gradient2 is None):
+        raise ValueError("Both additional angular gradient groups are required")
     e, c = edges.shape[1], radial.shape[-1] // 12
     ptr = torch.empty(nodes + 1, device=edges.device, dtype=torch.int32)
     wrap_triton(_bounds)[(triton.cdiv(nodes + 1, 32),)](
