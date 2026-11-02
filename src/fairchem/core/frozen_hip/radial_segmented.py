@@ -134,8 +134,8 @@ def segmented_radial_dx(
         c,
         channel_tile,
         edge_tile,
-        G1=gradient1,
-        G2=gradient2,
+        G1=gradient if gradient1 is None else gradient1,
+        G2=gradient if gradient2 is None else gradient2,
         SPLIT=gradient1 is not None,
         num_warps=4,
     )

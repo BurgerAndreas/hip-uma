@@ -193,11 +193,35 @@ def radial_gather_grad(
     tile = _KERNEL_CONFIG["channel_tile"]
     grid = (min(max(e, 1), 8192), triton.cdiv(2 * c, tile))
     wrap_triton(_backward_radial)[grid](
-        x, w, edges, gradient, dr, e, c, tile, 8192, num_warps=tile // 32
+        x,
+        w,
+        edges,
+        gradient,
+        dr,
+        e,
+        c,
+        tile,
+        8192,
+        G1=gradient,
+        G2=gradient,
+        SPLIT=False,
+        num_warps=tile // 32,
     )
     if need_x:
         wrap_triton(_backward_node)[grid](
-            w, edges, radial, gradient, dx, e, c, tile, 8192, num_warps=tile // 32
+            w,
+            edges,
+            radial,
+            gradient,
+            dx,
+            e,
+            c,
+            tile,
+            8192,
+            G1=gradient,
+            G2=gradient,
+            SPLIT=False,
+            num_warps=tile // 32,
         )
     return dx, dr
 

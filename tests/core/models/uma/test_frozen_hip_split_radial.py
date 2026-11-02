@@ -47,18 +47,20 @@ def test_split_handles_unused_modes_and_frozen_node_inputs():
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
 
-def test_split_compiles_and_recomputes_checkpoint():
+@pytest.mark.parametrize("split", [False, True])
+def test_split_compiles_and_recomputes_checkpoint(split):
     from torch.utils.checkpoint import checkpoint
 
-    from fairchem.core.frozen_hip.edge_precision import SplitMixedRadial
+    from fairchem.core.frozen_hip.edge_precision import MixedRadial, SplitMixedRadial
 
     x, edges, w, r = inputs(5, 17)
 
     def operation(x, r):
-        return sum(
-            part.float().square().mean()
-            for part in SplitMixedRadial.apply(x, edges, w, r, False)
+        result = (SplitMixedRadial if split else MixedRadial).apply(
+            x, edges, w, r, False
         )
+        parts = result if split else (result,)
+        return sum(part.float().square().mean() for part in parts)
 
     expected = torch.autograd.grad(operation(x, r), (x, r))
     compiled = torch.compile(operation, fullgraph=True)

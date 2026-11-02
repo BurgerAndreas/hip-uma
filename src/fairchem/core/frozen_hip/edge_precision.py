@@ -247,7 +247,7 @@ def mixed_radial_grad(
     warps = min(4, tile // 32)
     grid = (min(max(e, 1), 8192), triton.cdiv(2 * c, tile))
     wrap_triton(_backward_radial)[grid](
-        x, w, edges, g, dr, e, c, tile, 8192, num_warps=warps
+        x, w, edges, g, dr, e, c, tile, 8192, G1=g, G2=g, SPLIT=False, num_warps=warps
     )
     if need_x:
         if segmented:
@@ -257,7 +257,19 @@ def mixed_radial_grad(
             dx = segmented_radial_dx(w, edges, r, g, x.shape[0], bc, be)
         else:
             wrap_triton(_backward_node)[grid](
-                w, edges, r, g, dx, e, c, tile, 8192, num_warps=warps
+                w,
+                edges,
+                r,
+                g,
+                dx,
+                e,
+                c,
+                tile,
+                8192,
+                G1=g,
+                G2=g,
+                SPLIT=False,
+                num_warps=warps,
             )
     return dx, dr
 
