@@ -46,7 +46,7 @@ Complex convolutions also avoid concatenation buffers and fold weight gradients 
 Parameter names and checkpoint tensor shapes remain unchanged.
 Checkpoint metadata records the selected path for evaluation.
 
-The path remains optional until matched-batch benchmarks qualify its speed and accuracy.
+The path is optional. The H200 measurements below qualify its speed and accuracy in these tests.
 These checks must include the complete head and activation checkpoint recomputation.
 Short numerical tests do not establish final validation accuracy.
 
@@ -61,3 +61,59 @@ Use a private directory. The cache contains executable compiler artifacts.
 
 The segment wrapper accepts `FUSED_RANGE_PACK=1` and `COMPILER_CACHE_ROOT=DIRECTORY`.
 Measure restart time separately from steady training time.
+
+### H200 packing benchmark
+
+The final dispatch uses the compiler path for contiguous FP32 operands.
+Custom kernels handle strided operands and virtual concatenations.
+Reproduce the component measurements with `tools/benchmark_hip_range_pack.py`.
+
+The complete training test uses two conditioned head blocks with twice the standard width.
+It retains the same checkpoint, optimizer, batch order, batch limits, and two loader workers.
+Each replay runs 600 updates. Timing excludes the first 300 updates because compilation continues there.
+
+| Measurement | Repeated baseline | Fused packing |
+|---|---:|---:|
+| Update time, matched updates 301–600 | 72.64 ms | 58.17 ms |
+| Update time, matched updates 101–200 | 96.15 ms | 75.51 ms |
+| Peak allocated GPU memory | 58.87 GB | 63.58 GB |
+| Peak reserved GPU memory | 65.14 GB | 66.31 GB |
+
+Throughput increases by 24.9% over the repeated baseline in the primary timing window.
+These short windows do not establish throughput across the complete training distribution.
+Peak allocated GPU memory increases by 4.71 GB.
+
+The 100-update profile measures 20.41 ms of matrix products and 11.39 ms of layout copies per update.
+Range packing and associated reductions now take about 8.58 ms, including casts and scaling.
+The previous profile measured about 31.24 ms for range, bias, and scaling kernels.
+The new trace contains about 919 kernels per update and about 16.5 ms of GPU gaps.
+Remaining layout copies and kernel launch overhead therefore remain useful targets.
+Profiler overhead is about 5.5% for the matched window.
+
+A separate compiler-cache control uses the earlier packing variant.
+Its session duration falls from 223.49 seconds with fresh compiler directories to 110.16 seconds with restored artifacts.
+These durations include compilation and 600 updates. They do not measure steady training throughput.
+
+See [the benchmark record](frozen_hip_range_pack_benchmark.json) for numerical differences and component timings.
+
+The 39 focused GPU tests pass, including compiled backward and checkpoint recomputation.
+A fixed 1,024-sample subset of the monitoring cohort also checks all four projected metrics.
+These metrics use mass weighting and Eckart projection. Error units are eV/(Å²·amu).
+
+| Metric | Repeated baseline | Optimized training endpoint |
+|---|---:|---:|
+| abs cos(v₁) | 0.848064 | 0.849662 |
+| Eigenvalue MAE | 0.0277160 | 0.0276210 |
+| Hessian MAE | 0.00295851 | 0.00295968 |
+| Hessian RMSE | 0.00855436 | 0.00856813 |
+
+The initial maximum-parameter gate failed, so qualification also used direct accuracy checks.
+A two-sided endpoint v₁ check also failed because its score improved.
+The final accuracy criterion checks degradation on trained endpoints and absolute agreement with identical weights.
+It retains the original baseline-repeat tolerances. All eight checks pass.
+Identical-weight Cartesian predictions differ by 0.0234% in relative L2 norm.
+The accuracy probe uses eager evaluation; throughput measurements use compiled training.
+Full-run accuracy still needs validation.
+
+Cache artifacts also pass a GPU test across two nodes and two source directories.
+The restored process records two graph-cache hits. Outputs and gradients match.

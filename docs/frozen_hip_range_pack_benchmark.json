@@ -1,0 +1,387 @@
+{
+  "implementation_revision": "eaf94346",
+  "hardware": "NVIDIA H200",
+  "torch": "2.8.0+cu128",
+  "configuration": {
+    "head_layers": 2,
+    "head_width_multiplier": 2,
+    "charge_spin_conditioning": true,
+    "loss": "block-rmse",
+    "weight_decay": 0,
+    "logical_batch_cap": 64,
+    "atom_target": 2560,
+    "microbatch_pairs": 393216,
+    "loader_workers": 2,
+    "precision": "FP16 operands; FP32 matrix accumulations, outputs, reductions, parameters, optimizer state"
+  },
+  "matched_training_benchmark": {
+    "cases": [
+      {
+        "case": "baseline",
+        "seconds_per_update": 0.07825291755997266,
+        "peak_reserved_GB": 65.13754112,
+        "finite": true,
+        "identical_batch_order": true,
+        "skipped_updates": 1441,
+        "baseline_skipped_updates": 1441,
+        "relative_weight_l2": 4.2447992595422334e-05,
+        "max_weight_difference": 0.0025615543127059937,
+        "max_relative_loss_difference": 0.0033769504121499124,
+        "speedup_vs_warm_baseline": 0.9282926944093599
+      },
+      {
+        "case": "fused-v3-repeat",
+        "seconds_per_update": 0.05816842588673656,
+        "peak_reserved_GB": 66.31194624,
+        "finite": true,
+        "identical_batch_order": true,
+        "skipped_updates": 1441,
+        "baseline_skipped_updates": 1441,
+        "relative_weight_l2": 7.101674613973921e-05,
+        "max_weight_difference": 0.004611343145370483,
+        "max_relative_loss_difference": 0.004858055498909379,
+        "speedup_vs_warm_baseline": 1.2488151532342586
+      },
+      {
+        "case": "baseline-repeat",
+        "seconds_per_update": 0.07264161168714053,
+        "peak_reserved_GB": 65.13754112,
+        "finite": true,
+        "identical_batch_order": true,
+        "skipped_updates": 1441,
+        "baseline_skipped_updates": 1441,
+        "relative_weight_l2": 0.0,
+        "max_weight_difference": 0,
+        "max_relative_loss_difference": 0.0,
+        "speedup_vs_warm_baseline": 1.0
+      }
+    ],
+    "production_changed": false,
+    "timing_window": "Matched updates 301-600; first 300 excluded for compilation",
+    "matched_updates_101_200": [
+      {
+        "case": "baseline",
+        "seconds_per_update": 0.10113143178983591
+      },
+      {
+        "case": "fused-v3-repeat",
+        "seconds_per_update": 0.07550661050016061
+      },
+      {
+        "case": "baseline-repeat",
+        "seconds_per_update": 0.0961471569200512
+      }
+    ]
+  },
+  "profile": {
+    "steps": 100,
+    "profiled_ms_per_update": 79.67953270996094,
+    "unprofiled_matched_ms_per_update": 75.5066105001606,
+    "kernel_busy_percent": {
+      "0": 79.31165288010516
+    },
+    "kernels_per_update": 918.81,
+    "kernel_families": [
+      {
+        "family": "other",
+        "ms_per_update": 22.81786614000004,
+        "calls_per_update": 678.61,
+        "percent": 36.10698693096571
+      },
+      {
+        "family": "matrix_products",
+        "ms_per_update": 20.412869470000004,
+        "calls_per_update": 113.98,
+        "percent": 32.301320669277885
+      },
+      {
+        "family": "concatenation_layout_copies",
+        "ms_per_update": 11.387299730000002,
+        "calls_per_update": 25.22,
+        "percent": 18.019260872484843
+      },
+      {
+        "family": "custom_range_pack_and_bias",
+        "ms_per_update": 7.563761619999997,
+        "calls_per_update": 60.0,
+        "percent": 11.968894912724714
+      },
+      {
+        "family": "range_reductions",
+        "ms_per_update": 0.6758749299999998,
+        "calls_per_update": 34.0,
+        "percent": 1.0695043574515999
+      },
+      {
+        "family": "precision_casts_and_scaling",
+        "ms_per_update": 0.33748092999999985,
+        "calls_per_update": 7.0,
+        "percent": 0.5340297578308139
+      }
+    ]
+  },
+  "operand_benchmark": {
+    "gpu": "NVIDIA H200",
+    "torch": "2.8.0+cu128",
+    "rows": 131072,
+    "columns": 768,
+    "repeats": 100,
+    "cases": [
+      {
+        "dtype": "torch.float32",
+        "split": false,
+        "bias": false,
+        "baseline_ms": 0.2381046485900879,
+        "optimized_ms": 0.2382649612426758,
+        "speedup": 0.9993271664799063
+      },
+      {
+        "dtype": "torch.float32",
+        "split": false,
+        "bias": true,
+        "baseline_ms": 0.3374534225463867,
+        "optimized_ms": 0.3372307205200195,
+        "speedup": 1.0006603847538675
+      },
+      {
+        "dtype": "torch.float32",
+        "split": true,
+        "bias": false,
+        "baseline_ms": 0.7693996429443359,
+        "optimized_ms": 0.34092193603515625,
+        "speedup": 2.256820584478303
+      },
+      {
+        "dtype": "torch.float32",
+        "split": true,
+        "bias": true,
+        "baseline_ms": 1.556884765625,
+        "optimized_ms": 0.39950721740722656,
+        "speedup": 3.8970128643208786
+      },
+      {
+        "dtype": "torch.float16",
+        "split": false,
+        "bias": false,
+        "baseline_ms": 0.4642092895507812,
+        "optimized_ms": 0.025792319774627686,
+        "speedup": 17.997965813351588
+      },
+      {
+        "dtype": "torch.float16",
+        "split": false,
+        "bias": true,
+        "baseline_ms": 0.6036111831665039,
+        "optimized_ms": 0.41965824127197265,
+        "speedup": 1.4383398770794418
+      },
+      {
+        "dtype": "torch.float16",
+        "split": true,
+        "bias": false,
+        "baseline_ms": 0.7784754943847656,
+        "optimized_ms": 0.2800294494628906,
+        "speedup": 2.779977234101333
+      },
+      {
+        "dtype": "torch.float16",
+        "split": true,
+        "bias": true,
+        "baseline_ms": 1.4802035522460937,
+        "optimized_ms": 0.36905601501464846,
+        "speedup": 4.010782894806204
+      }
+    ]
+  },
+  "compiler_cache": {
+    "note": "Separate fresh-process experiment with the same compiler helper and the earlier packing variant. Session duration includes compilation and 600 updates.",
+    "fresh_compiler_control_seconds": 223.4896127450047,
+    "restored_artifact_seconds": 110.15729518199805,
+    "control_process_seconds": 271.0118320680922,
+    "restored_process_seconds": 157.42281566606835,
+    "loaded": true,
+    "identical_batch_order": true,
+    "relative_endpoint_weight_l2": 2.9650168526391138e-05,
+    "control_skipped_updates": 1442,
+    "restored_skipped_updates": 1441
+  },
+  "tests_passed": 39,
+  "accuracy_probe": {
+    "samples": 1024,
+    "sample_ids_sha256": "37932fd60793e98d4e5fd9451c60ec5eef31699a3d60e81179a3af54506fec29",
+    "metrics": {
+      "baseline": {
+        "mass_weighted_eckart_abs_cos_v1": 0.8485488502672194,
+        "mass_weighted_eckart_eigenvalue_mae": 0.02801365863448675,
+        "mass_weighted_eckart_hessian_mae": 0.002962244083961047,
+        "mass_weighted_eckart_hessian_rmse": 0.008588791947669977,
+        "mass_weighted_eckart_samples": 1024,
+        "mass_weighted_eckart_samples_without_modes": 0,
+        "mass_weighted_eckart_precision": "float64",
+        "mass_weighted_eckart_unit": "eV/(Angstrom^2*amu)",
+        "mass_weighted_eckart_hessian_frame": "full Cartesian 3N by 3N",
+        "mass_weighted_eckart_first_mode": "lowest algebraic vibrational eigenvalue",
+        "mass_weighted_eckart_averaging": "equal geometry means"
+      },
+      "baseline-repeat": {
+        "mass_weighted_eckart_abs_cos_v1": 0.8480637610295131,
+        "mass_weighted_eckart_eigenvalue_mae": 0.027716022160086503,
+        "mass_weighted_eckart_hessian_mae": 0.0029585068065732943,
+        "mass_weighted_eckart_hessian_rmse": 0.008554362001245267,
+        "mass_weighted_eckart_samples": 1024,
+        "mass_weighted_eckart_samples_without_modes": 0,
+        "mass_weighted_eckart_precision": "float64",
+        "mass_weighted_eckart_unit": "eV/(Angstrom^2*amu)",
+        "mass_weighted_eckart_hessian_frame": "full Cartesian 3N by 3N",
+        "mass_weighted_eckart_first_mode": "lowest algebraic vibrational eigenvalue",
+        "mass_weighted_eckart_averaging": "equal geometry means"
+      },
+      "fused": {
+        "mass_weighted_eckart_abs_cos_v1": 0.8496624403021369,
+        "mass_weighted_eckart_eigenvalue_mae": 0.027621006389094392,
+        "mass_weighted_eckart_hessian_mae": 0.0029596825560440467,
+        "mass_weighted_eckart_hessian_rmse": 0.008568129844457735,
+        "mass_weighted_eckart_samples": 1024,
+        "mass_weighted_eckart_samples_without_modes": 0,
+        "mass_weighted_eckart_precision": "float64",
+        "mass_weighted_eckart_unit": "eV/(Angstrom^2*amu)",
+        "mass_weighted_eckart_hessian_frame": "full Cartesian 3N by 3N",
+        "mass_weighted_eckart_first_mode": "lowest algebraic vibrational eigenvalue",
+        "mass_weighted_eckart_averaging": "equal geometry means"
+      },
+      "fused-same-weights": {
+        "mass_weighted_eckart_abs_cos_v1": 0.8469625889019095,
+        "mass_weighted_eckart_eigenvalue_mae": 0.027712968532473525,
+        "mass_weighted_eckart_hessian_mae": 0.002958474173885064,
+        "mass_weighted_eckart_hessian_rmse": 0.008554469658278097,
+        "mass_weighted_eckart_samples": 1024,
+        "mass_weighted_eckart_samples_without_modes": 0,
+        "mass_weighted_eckart_precision": "float64",
+        "mass_weighted_eckart_unit": "eV/(Angstrom^2*amu)",
+        "mass_weighted_eckart_hessian_frame": "full Cartesian 3N by 3N",
+        "mass_weighted_eckart_first_mode": "lowest algebraic vibrational eigenvalue",
+        "mass_weighted_eckart_averaging": "equal geometry means"
+      }
+    },
+    "checks": [
+      {
+        "case": "fused",
+        "metric": "mass_weighted_eckart_abs_cos_v1",
+        "criterion": "no accuracy degradation",
+        "difference": -0.0015986792726238042,
+        "tolerance": 0.0014552677131188796,
+        "passed": true
+      },
+      {
+        "case": "fused-same-weights",
+        "metric": "mass_weighted_eckart_abs_cos_v1",
+        "criterion": "absolute agreement",
+        "difference": 0.0011011721276036335,
+        "tolerance": 0.0014552677131188796,
+        "passed": true
+      },
+      {
+        "case": "fused",
+        "metric": "mass_weighted_eckart_eigenvalue_mae",
+        "criterion": "no accuracy degradation",
+        "difference": -9.501577099211081e-05,
+        "tolerance": 0.000892909423200746,
+        "passed": true
+      },
+      {
+        "case": "fused-same-weights",
+        "metric": "mass_weighted_eckart_eigenvalue_mae",
+        "criterion": "absolute agreement",
+        "difference": 3.053627612978338e-06,
+        "tolerance": 0.000892909423200746,
+        "passed": true
+      },
+      {
+        "case": "fused",
+        "metric": "mass_weighted_eckart_hessian_mae",
+        "criterion": "no accuracy degradation",
+        "difference": 1.175749470752347e-06,
+        "tolerance": 1.1211832163258127e-05,
+        "passed": true
+      },
+      {
+        "case": "fused-same-weights",
+        "metric": "mass_weighted_eckart_hessian_mae",
+        "criterion": "absolute agreement",
+        "difference": 3.2632688230435636e-08,
+        "tolerance": 1.1211832163258127e-05,
+        "passed": true
+      },
+      {
+        "case": "fused",
+        "metric": "mass_weighted_eckart_hessian_rmse",
+        "criterion": "no accuracy degradation",
+        "difference": 1.3767843212468198e-05,
+        "tolerance": 0.00010328983927413056,
+        "passed": true
+      },
+      {
+        "case": "fused-same-weights",
+        "metric": "mass_weighted_eckart_hessian_rmse",
+        "criterion": "absolute agreement",
+        "difference": 1.0765703283011074e-07,
+        "tolerance": 0.00010328983927413056,
+        "passed": true
+      }
+    ],
+    "same_weight_output_relative_l2": 0.00023396656178495482,
+    "seconds": 83.15386618999764,
+    "approved": true,
+    "mode": "eager accuracy probe; throughput measured separately with compiled training",
+    "initial_absolute_endpoint_checks": [
+      {
+        "metric": "mass_weighted_eckart_abs_cos_v1",
+        "baseline_repeat_noise": 0.0004850892377062932,
+        "candidate_difference": 0.0015986792726238042,
+        "tolerance": 0.0014552677131188796,
+        "passed": false
+      },
+      {
+        "metric": "mass_weighted_eckart_eigenvalue_mae",
+        "baseline_repeat_noise": 0.0002976364744002487,
+        "candidate_difference": 9.501577099211081e-05,
+        "tolerance": 0.000892909423200746,
+        "passed": true
+      },
+      {
+        "metric": "mass_weighted_eckart_hessian_mae",
+        "baseline_repeat_noise": 3.737277387752709e-06,
+        "candidate_difference": 1.175749470752347e-06,
+        "tolerance": 1.1211832163258127e-05,
+        "passed": true
+      },
+      {
+        "metric": "mass_weighted_eckart_hessian_rmse",
+        "baseline_repeat_noise": 3.442994642471019e-05,
+        "candidate_difference": 1.3767843212468198e-05,
+        "tolerance": 0.00010328983927413056,
+        "passed": true
+      }
+    ],
+    "qualification_criterion": "Trained endpoints must preserve or improve held-out accuracy. Identical-weight metrics must agree. Tolerances retain the original baseline repeat limits."
+  },
+  "memory": {
+    "baseline_peak_allocated_GB": 58.872346112,
+    "optimized_peak_allocated_GB": 63.578522624,
+    "baseline_peak_reserved_GB": 65.13754112,
+    "optimized_peak_reserved_GB": 66.31194624
+  },
+  "qualification_notes": [
+    "Maximum parameter difference exceeded the initial 1.5-times baseline repeat limit.",
+    "A fixed held-out probe then checked accuracy degradation and identical-weight metric agreement.",
+    "The initial two-sided endpoint v1 agreement check failed because the score improved.",
+    "Accuracy acceptance uses the original tolerances with one-sided endpoint checks and two-sided identical-weight checks.",
+    "The probe uses eager evaluation; throughput uses compiled training. Full-run accuracy requires validation."
+  ],
+  "portable_compiler_cache": {
+    "loaded": true,
+    "fxgraph_cache_hits": 2,
+    "cross_node_and_source_path": true,
+    "outputs_and_gradients_match": true
+  }
+}
