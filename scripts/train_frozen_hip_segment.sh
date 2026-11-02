@@ -145,6 +145,8 @@ if [[ "${SKINNY_READOUT:-0}" == 1 ]]; then args+=(--skinny-readout); fi
 if [[ "${TUNED_EDGE_KERNELS:-0}" == 1 ]]; then args+=(--tuned-edge-kernels); fi
 if [[ "${ALLOW_FP16_CACHE:-0}" == 1 ]]; then args+=(--allow-fp16-cache); fi
 if [[ "${PACK_FEATURES_FP16:-0}" == 1 ]]; then args+=(--pack-features-fp16); fi
+if [[ "${FUSED_RANGE_PACK:-0}" == 1 ]]; then args+=(--fused-range-pack); fi
+if [[ -n "${COMPILER_CACHE_ROOT:-}" ]]; then args+=(--compiler-cache "$COMPILER_CACHE_ROOT"); fi
 if [[ -n "${COMPILE_MODE:-}" ]]; then args+=(--compile-mode "$COMPILE_MODE"); fi
 if [[ -n "${CODE_REVISION:-}" ]]; then args+=(--code-revision "$CODE_REVISION"); fi
 

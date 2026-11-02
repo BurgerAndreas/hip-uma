@@ -40,13 +40,13 @@ from fairchem.core.frozen_hip.sequence import (
     PackedSequence,
     PlannedPackedDataset,
     capture_rng,
+    digest_json,
+    fixed_rng,
+    pin_manifest,
+    pin_validation_order,
     restore_rng,
     seed_rng,
     seed_update,
-    pin_manifest,
-    pin_validation_order,
-    digest_json,
-    fixed_rng,
 )
 from fairchem.core.frozen_hip.validation import (
     EvaluationStream,
@@ -66,6 +66,8 @@ def parse_args():
     p.add_argument("--duration", type=float, default=13200)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--compile-edge-limit", type=int, default=393216)
+    p.add_argument("--fused-range-pack", action="store_true")
+    p.add_argument("--compiler-cache", type=Path)
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument(
         "--loss", choices=("mse", "mae", "block-rmse", "mass-block-rmse"), default="mse"
@@ -205,6 +207,8 @@ def parse_args():
         )
     if args.head_precision == "fp16-edge" and args.scaled_linear:
         p.error("FP16 edge mode cannot use adaptive scaled linear operations")
+    if args.fused_range_pack and args.head_precision != "fp16-edge":
+        p.error("Fused range packing requires FP16 edge precision")
     if args.skinny_readout and args.head_precision != "fp16-edge":
         p.error("Skinny readout requires FP16 edge precision")
     if args.tuned_edge_kernels and args.head_precision != "fp16-edge":
@@ -295,6 +299,7 @@ def main():
             ("fused_radial", False),
             ("radial_tile", 64),
             ("segmented_scatter", False),
+            ("fused_range_pack", False),
         ):
             setattr(
                 args,
@@ -314,6 +319,22 @@ def main():
         raise ValueError("Global batch limits must be divisible by the rank count")
     torch.cuda.set_device(local)
     device = torch.device("cuda", local)
+    cache_namespace = ":".join(
+        str(value)
+        for value in (
+            args.code_revision,
+            args.layers,
+            args.head_width_multiplier,
+            args.head_precision,
+            args.fused_range_pack,
+            args.compile_mode,
+        )
+    )
+    if args.compiler_cache:
+        from fairchem.core.frozen_hip.compiler_cache import load_compiler_cache
+
+        loaded = load_compiler_cache(args.compiler_cache, cache_namespace)
+        print(json.dumps(dict(event="compiler_cache_load", loaded=loaded)), flush=True)
     if args.cuda_graphs:
         # Older autograd versions retain a node's first CUDA stream. Keep that
         # stream capturable when later backward passes enter a CUDA graph.
@@ -400,6 +421,9 @@ def main():
         enable_fused_radial(model.head)
     head = model.head
     configure_head_precision(head, args.head_precision)
+    from fairchem.core.frozen_hip.edge_precision import enable_fused_range_pack
+
+    enable_fused_range_pack(head, enabled=args.fused_range_pack)
     if args.skinny_readout:
         from fairchem.core.frozen_hip.edge_precision import enable_skinny_readout
 
@@ -961,6 +985,7 @@ def main():
             "seed": args.seed,
             "world_size": world,
             "loss_name": args.loss,
+            "fused_range_pack": args.fused_range_pack,
             "loss": (
                 "structure_mean_mse_eV2_Angstrom4"
                 if args.loss == "mse"
@@ -1549,6 +1574,7 @@ def main():
         configure_radial_tile(state.get("radial_tile", 64))
         enable_fused_radial(head, enabled=state.get("fused_radial", False))
         configure_head_precision(head, args.head_precision)
+        enable_fused_range_pack(head, enabled=state.get("fused_range_pack", False))
         from fairchem.core.frozen_hip.edge_precision import enable_skinny_readout
 
         enable_skinny_readout(head, enabled=state.get("skinny_readout", False))
@@ -1567,6 +1593,13 @@ def main():
         }
         (args.output / "session.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps({"event": "session_complete", **summary}), flush=True)
+        if args.compiler_cache:
+            from fairchem.core.frozen_hip.compiler_cache import save_compiler_cache
+
+            saved = save_compiler_cache(args.compiler_cache, cache_namespace)
+            print(
+                json.dumps(dict(event="compiler_cache_save", saved=saved)), flush=True
+            )
     if world > 1:
         dist.destroy_process_group()
 

@@ -36,12 +36,17 @@ from fairchem.core.models.uma.triton.kernels import (
 
 class HalfLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, w, b, out32):
+    def forward(ctx, x, w, b, out32, fused):
         flat = x.reshape(-1, x.shape[-1])
         if out32:
             # Learned message amplitudes can exceed the FP16 exponent range.
             # Power-of-two scales retain tensor-core products without clipping.
-            xh, sx = quantize(flat)
+            if fused:
+                from fairchem.core.frozen_hip.range_pack import pack_pair
+
+                xh, sx, _ = pack_pair(flat)
+            else:
+                xh, sx = quantize(flat)
             wh, sw = quantize(w)
             ctx.save_for_backward(xh, wh, sx, sw)
         else:
@@ -51,6 +56,7 @@ class HalfLinear(torch.autograd.Function):
         ctx.dtype = x.dtype
         ctx.bias = b is not None
         ctx.out32 = out32
+        ctx.fused = fused
         if out32:
             out = half_mm_float_output(xh, wh.t()) * (sx * sw)
             if b is not None:
@@ -67,7 +73,14 @@ class HalfLinear(torch.autograd.Function):
         g = g.reshape(-1, w.shape[0])
         if ctx.out32:
             sx, sw = saved[2:]
-            gh, sg = quantize(g)
+            need_bias = ctx.bias and ctx.needs_input_grad[2]
+            if ctx.fused:
+                from fairchem.core.frozen_hip.range_pack import pack_pair
+
+                gh, sg, db = pack_pair(g, bias=need_bias)
+            else:
+                gh, sg = quantize(g)
+                db = g.float().sum(0) if need_bias else None
             dx = (
                 (half_mm_float_output(gh, w) * (sg * sw)).reshape(ctx.shape)
                 if ctx.needs_input_grad[0]
@@ -78,8 +91,7 @@ class HalfLinear(torch.autograd.Function):
                 if ctx.needs_input_grad[1]
                 else None
             )
-            db = g.float().sum(0) if ctx.bias and ctx.needs_input_grad[2] else None
-            return dx, dw, db, None
+            return dx, dw, db if need_bias else None, None, None
         gh = g.half()
         dx = (
             (
@@ -90,26 +102,118 @@ class HalfLinear(torch.autograd.Function):
         )
         dw = half_mm_float_output(gh.t(), x) if ctx.needs_input_grad[1] else None
         db = g.float().sum(0) if ctx.bias and ctx.needs_input_grad[2] else None
-        return dx, dw, db, None
+        return dx, dw, db, None, None
 
 
-def half_linear(x, w, b=None, *, out32=False):
-    return HalfLinear.apply(x, w, b, out32)
+def half_linear(x, w, b=None, *, out32=False, fused=False):
+    return HalfLinear.apply(x, w, b, out32, fused)
 
 
 def linear_forward(self, x):
     return half_linear(
-        x, self.weight, self.bias, out32=getattr(self, "hip_fp32_output", False)
+        x,
+        self.weight,
+        self.bias,
+        out32=getattr(self, "hip_fp32_output", False),
+        fused=getattr(self, "hip_fused_range_pack", False),
     )
 
 
 def so2_forward(self, x):
+    if getattr(self, "hip_fused_range_pack", False):
+        return ComplexHalfLinear.apply(x, self.fc.weight, self.m_output_channels)
     real, imag = self.fc.weight.split(self.out_channels_half, 0)
     weight = torch.cat((torch.cat((real, -imag), 1), torch.cat((imag, real), 1)), 0)
     out = half_linear(
         x.flatten(1), weight, out32=getattr(self, "hip_fp32_output", False)
     )
     return out.reshape(x.shape[0], 2, -1, self.m_output_channels).unbind(1)
+
+
+class SplitHalfLinear(torch.autograd.Function):
+    """Return gates and messages separately, and fuse their incoming gradients."""
+
+    @staticmethod
+    def forward(ctx, x, weight, bias, split):
+        from fairchem.core.frozen_hip.range_pack import pack_pair
+
+        flat = x.reshape(-1, x.shape[-1])
+        xh, sx, _ = pack_pair(flat)
+        wh, sw = quantize(weight)
+        ctx.save_for_backward(xh, wh, sx, sw)
+        ctx.shape, ctx.bias = x.shape, bias is not None
+        output = half_mm_float_output(xh, wh.t()) * (sx * sw)
+        if bias is not None:
+            output = output + bias
+        return output[:, :split], output[:, split:]
+
+    @staticmethod
+    def backward(ctx, gates, messages):
+        from fairchem.core.frozen_hip.range_pack import pack_pair
+
+        x, w, sx, sw = ctx.saved_tensors
+        need_bias = ctx.bias and ctx.needs_input_grad[2]
+        gh, sg, db = pack_pair(gates, messages, bias=need_bias)
+        dx = (
+            (half_mm_float_output(gh, w) * (sg * sw)).reshape(ctx.shape)
+            if ctx.needs_input_grad[0]
+            else None
+        )
+        dw = (
+            half_mm_float_output(gh.t(), x) * (sg * sx)
+            if ctx.needs_input_grad[1]
+            else None
+        )
+        return dx, dw, db if need_bias else None, None
+
+
+class ComplexHalfLinear(torch.autograd.Function):
+    """Pack real/imaginary operands and gradients without edge-sized stacks."""
+
+    @staticmethod
+    def forward(ctx, x, weight, channels):
+        from fairchem.core.frozen_hip.range_pack import expand_complex_weight, pack_pair
+
+        flat = x.flatten(1)
+        xh, sx, _ = pack_pair(flat)
+        wh, sw = quantize(weight)
+        wh = expand_complex_weight(wh)
+        ctx.save_for_backward(xh, wh, sx, sw)
+        ctx.shape = x.shape
+        output = half_mm_float_output(xh, wh.t()) * (sx * sw)
+        width = weight.shape[0] // 2
+        return (
+            output[:, :width].reshape(x.shape[0], -1, channels),
+            output[:, width:].reshape(x.shape[0], -1, channels),
+        )
+
+    @staticmethod
+    def backward(ctx, real, imaginary):
+        from fairchem.core.frozen_hip.range_pack import fold_complex_gradient, pack_pair
+
+        x, w, sx, sw = ctx.saved_tensors
+        gh, sg, _ = pack_pair(real.flatten(1), imaginary.flatten(1))
+        dx = (
+            (half_mm_float_output(gh, w) * (sg * sw)).reshape(ctx.shape)
+            if ctx.needs_input_grad[0]
+            else None
+        )
+        dw = (
+            fold_complex_gradient(half_mm_float_output(gh.t(), x) * (sg * sx))
+            if ctx.needs_input_grad[1]
+            else None
+        )
+        return dx, dw, None
+
+
+def enable_fused_range_pack(head, enabled=True):
+    """Select coalesced operand packing while retaining FP32 state and outputs."""
+    if enabled and not getattr(head, "edge_mixed_precision", False):
+        raise ValueError("Fused range packing requires FP16 edge precision")
+    for module in head.modules():
+        if isinstance(module, (torch.nn.Linear, SO2_m_Conv)):
+            module.hip_fused_range_pack = enabled
+    head.fused_range_pack = enabled
 
 
 @triton_op("fairchem::hip_edge_mixed_radial", mutates_args={})
@@ -182,9 +286,14 @@ def radial_convolution(conv, x, edges, w, edge_features):
     parts = messages.split(conv.m_split_sizes, 1)
     e = messages.shape[0]
     c = conv.m_output_channels
-    scalar = conv.fc_m0(parts[0].flatten(1))
     extra = conv.extra_m0_output_channels
-    gates, scalar = scalar.split((extra, scalar.shape[-1] - extra), -1)
+    if getattr(conv.fc_m0, "hip_fused_range_pack", False):
+        gates, scalar = SplitHalfLinear.apply(
+            parts[0].flatten(1), conv.fc_m0.weight, conv.fc_m0.bias, extra
+        )
+    else:
+        scalar = conv.fc_m0(parts[0].flatten(1))
+        gates, scalar = scalar.split((extra, scalar.shape[-1] - extra), -1)
     out = [scalar.reshape(e, 3, c)]
     for m, block in enumerate(conv.so2_m_conv, 1):
         out.extend(block(parts[m].reshape(e, 2, (3 - m) * conv.sphere_channels)))
