@@ -65,8 +65,34 @@ def _forward(
 
 
 @triton.jit
+def _load_modal_gradient(
+    G, G1, G2, edge, component, channel, mask, C: tl.constexpr, SPLIT: tl.constexpr
+):
+    if SPLIT:
+        pointer = tl.where(component < 3, G, tl.where(component < 7, G1, G2))
+        width = tl.where(component < 3, 3, tl.where(component < 7, 4, 2))
+        local = component - tl.where(component < 3, 0, tl.where(component < 7, 3, 7))
+        offset = (edge * width + local) * (2 * C) + channel
+    else:
+        pointer = G
+        offset = (edge * 9 + component) * (2 * C) + channel
+    return tl.load(pointer + offset, mask, 0)
+
+
+@triton.jit
 def _backward_radial(
-    X, W, EDGES, G, DR, E, C: tl.constexpr, BC: tl.constexpr, GRID: tl.constexpr
+    X,
+    W,
+    EDGES,
+    G,
+    DR,
+    E,
+    C: tl.constexpr,
+    BC: tl.constexpr,
+    GRID: tl.constexpr,
+    G1=None,
+    G2=None,
+    SPLIT: tl.constexpr = False,
 ):
     e = tl.program_id(0).to(tl.int64)
     c = tl.program_id(1) * BC + tl.arange(0, BC)
@@ -81,12 +107,14 @@ def _backward_radial(
             l = (0, 2, 6, 3, 7, 8)[r]
             m = _m_order(l)
             value = _dot(X, W, atom, e, channel, mask, C, l)
-            grad = tl.load(G + (e * 9 + m) * (2 * C) + c, mask, 0)
+            grad = _load_modal_gradient(G, G1, G2, e, m, c, mask, C, SPLIT)
             result = value * grad
             if r >= 3:
                 other = (1, 5, 4)[r - 3]
                 value = _dot(X, W, atom, e, channel, mask, C, other)
-                grad = tl.load(G + (e * 9 + _m_order(other)) * (2 * C) + c, mask, 0)
+                grad = _load_modal_gradient(
+                    G, G1, G2, e, _m_order(other), c, mask, C, SPLIT
+                )
                 result += value * grad
             tl.store(DR + (e * 6 + r) * (2 * C) + c, result, mask)
         e += GRID
@@ -94,7 +122,18 @@ def _backward_radial(
 
 @triton.jit
 def _backward_node(
-    W, EDGES, R, G, DX, E, C: tl.constexpr, BC: tl.constexpr, GRID: tl.constexpr
+    W,
+    EDGES,
+    R,
+    G,
+    DX,
+    E,
+    C: tl.constexpr,
+    BC: tl.constexpr,
+    GRID: tl.constexpr,
+    G1=None,
+    G2=None,
+    SPLIT: tl.constexpr = False,
 ):
     e = tl.program_id(0).to(tl.int64)
     c = tl.program_id(1) * BC + tl.arange(0, BC)
@@ -116,7 +155,7 @@ def _backward_node(
                     radial = tl.load(
                         R + (e * 6 + _radial_row(m)) * (2 * C) + c, mask, 0
                     ).to(tl.float32)
-                    grad = tl.load(G + (e * 9 + m) * (2 * C) + c, mask, 0).to(
+                    grad = _load_modal_gradient(G, G1, G2, e, m, c, mask, C, SPLIT).to(
                         tl.float32
                     )
                     result += w * (radial * grad)

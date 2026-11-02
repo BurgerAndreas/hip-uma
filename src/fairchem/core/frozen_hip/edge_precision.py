@@ -278,13 +278,110 @@ class MixedRadial(torch.autograd.Function):
         return dx if ctx.needs_input_grad[0] else None, None, None, dr, None
 
 
+@triton_op("fairchem::hip_split_mixed_radial_grad", mutates_args={})
+def split_mixed_radial_grad(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    edges: torch.Tensor,
+    r: torch.Tensor,
+    g0: torch.Tensor,
+    g1: torch.Tensor,
+    g2: torch.Tensor,
+    need_x: bool,
+    tuned: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    e, c = edges.shape[1], x.shape[-1]
+    dr = torch.empty_like(r)
+    segmented = tuned and e >= 32768 and c >= 128
+    dx = torch.zeros_like(x) if need_x and not segmented else x.new_empty(0)
+    tile = _KERNEL_CONFIG["channel_tile"]
+    grid = (min(max(e, 1), 8192), triton.cdiv(2 * c, tile))
+    wrap_triton(_backward_radial)[grid](
+        x,
+        w,
+        edges,
+        g0,
+        dr,
+        e,
+        c,
+        tile,
+        8192,
+        G1=g1,
+        G2=g2,
+        SPLIT=True,
+        num_warps=min(4, tile // 32),
+    )
+    if need_x:
+        if segmented:
+            from fairchem.core.frozen_hip.radial_segmented import segmented_radial_dx
+
+            bc, be = (256, 4) if c >= 256 else (128, 8)
+            dx = segmented_radial_dx(w, edges, r, g0, x.shape[0], bc, be, g1, g2)
+        else:
+            wrap_triton(_backward_node)[grid](
+                w,
+                edges,
+                r,
+                g0,
+                dx,
+                e,
+                c,
+                tile,
+                8192,
+                G1=g1,
+                G2=g2,
+                SPLIT=True,
+                num_warps=min(4, tile // 32),
+            )
+    return dx, dr
+
+
+class SplitMixedRadial(torch.autograd.Function):
+    """Keep angular gradient groups separate through radial backward."""
+
+    @staticmethod
+    def forward(ctx, x, edges, w, r, tuned):
+        ctx.save_for_backward(x, edges, w, r)
+        ctx.tuned = tuned
+        return mixed_radial(x, w, edges, r).split((3, 4, 2), dim=1)
+
+    @staticmethod
+    def backward(ctx, g0, g1, g2):
+        x, edges, w, r = ctx.saved_tensors
+        dx, dr = split_mixed_radial_grad(
+            x,
+            w,
+            edges,
+            r,
+            g0.contiguous(),
+            g1.contiguous(),
+            g2.contiguous(),
+            ctx.needs_input_grad[0],
+            ctx.tuned,
+        )
+        return dx if ctx.needs_input_grad[0] else None, None, None, dr, None
+
+
+def enable_split_radial(head, enabled=True):
+    if enabled and not getattr(head, "edge_mixed_precision", False):
+        raise ValueError("Split radial gradients require FP16 edge precision")
+    for block in [block.edge_wise for block in head.blocks] + [head.edge_readout]:
+        block.so2_conv_1.hip_split_radial = enabled
+    head.split_radial = enabled
+
+
 def radial_convolution(conv, x, edges, w, edge_features):
     r = conv.rad_func(edge_features)
-    messages = MixedRadial.apply(
-        x, edges, w, r, getattr(conv, "hip_tuned_edge_kernels", False)
-    )
-    parts = messages.split(conv.m_split_sizes, 1)
-    e = messages.shape[0]
+    if getattr(conv, "hip_split_radial", False):
+        parts = SplitMixedRadial.apply(
+            x, edges, w, r, getattr(conv, "hip_tuned_edge_kernels", False)
+        )
+    else:
+        messages = MixedRadial.apply(
+            x, edges, w, r, getattr(conv, "hip_tuned_edge_kernels", False)
+        )
+        parts = messages.split(conv.m_split_sizes, 1)
+    e = parts[0].shape[0]
     c = conv.m_output_channels
     extra = conv.extra_m0_output_channels
     if getattr(conv.fc_m0, "hip_fused_range_pack", False):

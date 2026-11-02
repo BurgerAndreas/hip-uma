@@ -117,3 +117,16 @@ Full-run accuracy still needs validation.
 
 Cache artifacts also pass a GPU test across two nodes and two source directories.
 The restored process records two graph-cache hits. Outputs and gradients match.
+
+### Direct radial gradient reads
+
+`--split-radial` keeps the three angular gradient groups separate during radial backward.
+The kernels read each group directly, including reciprocal-edge node reductions.
+This removes the full radial gradient concatenation buffer.
+The forward values, FP16 operand storage, and FP32 reductions retain their existing definitions.
+The dataset and Hessian targets retain their packed representation.
+
+The flag requires `--head-precision fp16-edge`.
+The segment wrapper accepts `SPLIT_RADIAL=1`.
+Checkpoint metadata records the flag for resumed training and evaluation.
+The path remains optional while complete training benchmarks qualify performance.

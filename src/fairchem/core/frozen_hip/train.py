@@ -67,6 +67,7 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--compile-edge-limit", type=int, default=393216)
     p.add_argument("--fused-range-pack", action="store_true")
+    p.add_argument("--split-radial", action="store_true")
     p.add_argument("--compiler-cache", type=Path)
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument(
@@ -207,6 +208,8 @@ def parse_args():
         )
     if args.head_precision == "fp16-edge" and args.scaled_linear:
         p.error("FP16 edge mode cannot use adaptive scaled linear operations")
+    if args.split_radial and args.head_precision != "fp16-edge":
+        p.error("Split radial gradients require FP16 edge precision")
     if args.fused_range_pack and args.head_precision != "fp16-edge":
         p.error("Fused range packing requires FP16 edge precision")
     if args.skinny_readout and args.head_precision != "fp16-edge":
@@ -300,6 +303,7 @@ def main():
             ("radial_tile", 64),
             ("segmented_scatter", False),
             ("fused_range_pack", False),
+            ("split_radial", False),
         ):
             setattr(
                 args,
@@ -327,6 +331,7 @@ def main():
             args.head_width_multiplier,
             args.head_precision,
             args.fused_range_pack,
+            args.split_radial,
             args.compile_mode,
         )
     )
@@ -424,6 +429,9 @@ def main():
     from fairchem.core.frozen_hip.edge_precision import enable_fused_range_pack
 
     enable_fused_range_pack(head, enabled=args.fused_range_pack)
+    from fairchem.core.frozen_hip.edge_precision import enable_split_radial
+
+    enable_split_radial(head, enabled=args.split_radial)
     if args.skinny_readout:
         from fairchem.core.frozen_hip.edge_precision import enable_skinny_readout
 
@@ -986,6 +994,7 @@ def main():
             "world_size": world,
             "loss_name": args.loss,
             "fused_range_pack": args.fused_range_pack,
+            "split_radial": args.split_radial,
             "loss": (
                 "structure_mean_mse_eV2_Angstrom4"
                 if args.loss == "mse"
@@ -1575,6 +1584,7 @@ def main():
         enable_fused_radial(head, enabled=state.get("fused_radial", False))
         configure_head_precision(head, args.head_precision)
         enable_fused_range_pack(head, enabled=state.get("fused_range_pack", False))
+        enable_split_radial(head, enabled=state.get("split_radial", False))
         from fairchem.core.frozen_hip.edge_precision import enable_skinny_readout
 
         enable_skinny_readout(head, enabled=state.get("skinny_readout", False))

@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 from torch.library import triton_op, wrap_triton
 
-from fairchem.core.frozen_hip.radial import _radial_row
+from fairchem.core.frozen_hip.radial import _load_modal_gradient, _radial_row
 from fairchem.core.frozen_hip.scatter import _bounds, _m_order
 
 
@@ -23,6 +23,9 @@ def _node_gradient(
     C: tl.constexpr,
     BC: tl.constexpr,
     BE: tl.constexpr,
+    G1=None,
+    G2=None,
+    SPLIT: tl.constexpr = False,
 ):
     atom = tl.program_id(0) // 9
     coefficient = tl.program_id(0) % 9
@@ -60,10 +63,16 @@ def _node_gradient(
                     mask,
                     0,
                 ).to(tl.float32)
-                gi = tl.load(
-                    G + (incoming[:, None] * 9 + m) * (2 * C) + C + channel[None, :],
+                gi = _load_modal_gradient(
+                    G,
+                    G1,
+                    G2,
+                    incoming[:, None],
+                    m,
+                    C + channel[None, :],
                     mask,
-                    0,
+                    C,
+                    SPLIT,
                 ).to(tl.float32)
                 rr = tl.load(
                     R
@@ -72,10 +81,8 @@ def _node_gradient(
                     mask,
                     0,
                 ).to(tl.float32)
-                gr = tl.load(
-                    G + (reverse[:, None] * 9 + m) * (2 * C) + channel[None, :],
-                    mask,
-                    0,
+                gr = _load_modal_gradient(
+                    G, G1, G2, reverse[:, None], m, channel[None, :], mask, C, SPLIT
                 ).to(tl.float32)
                 value += wi[:, None] * (ri * gi) + wr[:, None] * (rr * gr)
         total += value
@@ -96,6 +103,8 @@ def segmented_radial_dx(
     nodes: int,
     channel_tile: int = 32,
     edge_tile: int = 16,
+    gradient1: torch.Tensor | None = None,
+    gradient2: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Require target-major complete graphs with contiguous molecule atoms.
 
@@ -125,6 +134,9 @@ def segmented_radial_dx(
         c,
         channel_tile,
         edge_tile,
+        G1=gradient1,
+        G2=gradient2,
+        SPLIT=gradient1 is not None,
         num_warps=4,
     )
     return out
