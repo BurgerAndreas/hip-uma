@@ -383,5 +383,6 @@
     "fxgraph_cache_hits": 2,
     "cross_node_and_source_path": true,
     "outputs_and_gradients_match": true
-  }
+  },
+  "accuracy_probe_limitation": "This original probe used independent random local-frame rolls between heads. The paired-roll probe in frozen_hip_layout_benchmark.json supersedes its identical-weight implementation comparison."
 }

@@ -111,7 +111,9 @@ The initial maximum-parameter gate failed, so qualification also used direct acc
 A two-sided endpoint v₁ check also failed because its score improved.
 The final accuracy criterion checks degradation on trained endpoints and absolute agreement with identical weights.
 It retains the original baseline-repeat tolerances. All eight checks pass.
-Identical-weight Cartesian predictions differ by 0.0234% in relative L2 norm.
+The original probe used independent random local-frame rolls between heads.
+Its identical-weight differences therefore include roll variation.
+The paired-roll probe below supersedes that comparison for implementation qualification.
 The accuracy probe uses eager evaluation; throughput measurements use compiled training.
 Full-run accuracy still needs validation.
 
@@ -129,10 +131,74 @@ The dataset and Hessian targets retain their packed representation.
 The flag requires `--head-precision fp16-edge`.
 The segment wrapper accepts `SPLIT_RADIAL=1`.
 Checkpoint metadata records the flag for resumed training and evaluation.
-The path remains optional while complete training benchmarks qualify performance.
+The combined configuration below qualifies this optional path for future training allocations.
 
 The trainer also accepts `--python-switch-interval SECONDS` for controlled host scheduling tests.
 The segment wrapper accepts `PYTHON_SWITCH_INTERVAL=SECONDS`.
 The default retains the interpreter setting.
 AMP reuses the finite result from its update helper and avoids two duplicate GPU scalar reads.
 Overflow checks, loss scaling, retries, and checkpoint commit rules remain active.
+
+
+### Layout copies and launch gaps
+
+Use `FUSED_RANGE_PACK=1`, `SPLIT_RADIAL=1`, `FUSED_WIGNER=1`, and `PYTHON_SWITCH_INTERVAL=.001` together.
+Keep `LOADER_WORKERS=2` and the existing private loader memory setup.
+
+The next optimization keeps the radial backward groups separate through their consumers.
+It avoids rebuilding the complete radial gradient tensor from the 3/4/2 angular groups.
+Fused Wigner setup reduces the number of small rotation kernels.
+A 1 ms Python switch interval helps the loader and GPU submission threads share the interpreter.
+The trainer also removes two duplicate finite-result GPU reads per update.
+It retains the original AMP checks and retries the same batch after overflow.
+
+A matched 600-update replay compares the combined configuration with fused range packing alone.
+The primary window uses accepted updates 301–600 and excludes compilation.
+The reference takes 61.44 ms per update. The combined configuration takes 56.37 ms.
+This increases throughput by 9.0%. Updates 101–200 improve by 4.3%.
+Peak allocated and reserved GPU memory remain 63.58 GB and 66.31 GB.
+A second replay includes the final duplicate finite-read cleanup in both paths.
+It measures 61.91 ms for the reference and 56.93 ms for the combined path.
+This confirms an 8.8% throughput increase on identical accepted batch sequences.
+Final peak allocated memory is 63.58 GB. Reserved memory rises from 66.31 to 66.82 GB.
+These short windows do not predict throughput for every molecule size.
+Explicit cuBLAS selection and a larger heuristic cache show no consistent benefit.
+
+The full CPU/CUDA trace reduces layout kernels with fused epilogues from 11.76 to 7.33 ms per update.
+Those kernels also perform arithmetic and casts; this category is not pure memory copying.
+Kernel count falls from about 919 to 778 per update.
+Matrix products still take about 20.4 ms in that traced window.
+CPU tracing increases host scheduling overhead, especially with the shorter switch interval.
+Its apparent launch gaps therefore cannot establish the unprofiled improvement.
+CPU use stays below the four allocated cores. Serial launch work can still delay GPU submission.
+
+A second trace records CUDA activity alone for matched updates 301–400.
+Its overhead is 4.0% for the reference and 2.6% for the combined path.
+Layout kernels with fused epilogues fall from 12.57 to 7.94 ms per update.
+Kernel count falls from 907 to 774 per update.
+Gaps between kernels fall from 14.79 to 11.28 ms per update.
+Conservative late host submissions explain 11.54 ms before and 8.96 ms after the change.
+Kernel activity rises from 82.2% to 85.7% of the captured GPU time envelope.
+Including GPU copies and memory initialization gives 82.5% before and 86.0% after.
+The remaining device idle time is 11.05 ms per update.
+These values measure trace activity, rather than sampled GPU utilization.
+Both traces have complete launch correlations and no compilation events.
+Matrix products still take 22.35 ms per update in this window.
+Host submission, remaining layout work, and range reductions remain useful targets.
+
+
+All 53 focused GPU tests pass, including compiled backward, checkpoint recomputation, and rotation edge cases.
+A complete-head gradient check uses the same weights, batch, and random local-frame roll.
+Eager gradients match exactly. Compiled relative L2 difference is 2.372e-5.
+The repeated compiled baseline differs by 2.346e-5.
+Both paths retain FP16 operand storage and FP32 products and reductions.
+
+The paired accuracy probe uses 1,024 fixed monitoring samples and FP64 projected metrics.
+It restores the same random local-frame roll before each head evaluation.
+The combined trained endpoint and identical-weight comparisons pass the stated degradation limits.
+Identical-weight Cartesian outputs differ by 0.0235% in relative L2 norm.
+The radial-only trained endpoint fails three projected error limits despite matching eager gradients exactly.
+That isolated endpoint is not accuracy-qualified. The combined package passes the separate check.
+The short probes do not establish final training accuracy. Full validation remains necessary.
+
+See [the layout benchmark record](frozen_hip_layout_benchmark.json) for paired metrics and gradient checks.
