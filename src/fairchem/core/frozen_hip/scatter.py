@@ -196,3 +196,42 @@ def fused_rotate_scatter(x, w, edges, nodes, offset=0, *, segmented=False):
             x, w, edges, nodes, offset
         )
     return _RotateScatter.apply(x, w, edges, nodes, offset, segmented)
+
+
+@triton_op("fairchem::hip_rotate_scatter_add", mutates_args={"out"})
+def rotate_scatter_add(
+    out: torch.Tensor, x: torch.Tensor, w: torch.Tensor, edges: torch.Tensor
+) -> None:
+    """
+    Rotate one edge chunk directly into an existing FP32 node accumulator.
+    """
+    e, _, c = x.shape
+    if e:
+        wrap_triton(permute_wigner_inv_edge_to_node_kernel)[
+            (min(e, GRID_E_STRIDE), triton.cdiv(c, BLOCK_C))
+        ](
+            x,
+            w,
+            out,
+            x,
+            e,
+            c,
+            BLOCK_C,
+            GRID_E_STRIDE,
+            False,
+            edges,
+            True,
+            0,
+            num_warps=1,
+        )
+
+
+def accumulate_rotated_messages(out, x, w, edges):
+    """
+    Reuse the global node buffer instead of clearing one buffer per edge chunk.
+    """
+    if torch.is_grad_enabled():
+        raise ValueError("Direct message accumulation requires frozen inference")
+    if out.dtype != torch.float32:
+        raise ValueError("Direct message accumulation requires an FP32 output")
+    rotate_scatter_add(out, x.contiguous(), w.contiguous(), edges.contiguous())

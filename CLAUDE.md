@@ -286,3 +286,21 @@ This includes:
   tensor-core inputs in FP16 and retain FP32 accumulators through rotation.
   Reject nonfinite features before cache publication and isolate cache namespaces
   when the expert output precision changes.
+
+- UMA random charge embeddings cover only integer charges -100 through +100.
+  Validate charge and spin before expert merging or any CUDA lookup. Never clamp
+  a system charge or add untrained embedding rows to bypass this restriction.
+- Backbone edge-degree rotations and message layers can allocate wide tensors
+  over all radius-graph edges. Frozen inference can accumulate chunked messages
+  before each node update. Restoring dispatch must also preserve prior chunk sizes.
+- The streamed HIP random-angle buffer remains quadratic. Scaling it in place
+  removes a second full buffer. Optional host storage preserves exact angles,
+  but requires quadratic host RAM and measured transfer time.
+
+- Cutoff block inference uses sorted, uncapped canonical pairs from occupied cells.
+  Preserve inclusive FP32 distances and both directed random-angle assignments.
+  General backends precompose the Wigner M-map; only fused backends accept the
+  direct rotate-scatter kernel. Test both paths before changing dispatch.
+- Sorting cutoff rows needs 64-bit global offsets even with int32 atom indices.
+  Graph storage is O(N+K), but exact legacy random-angle initialization stays
+  quadratic. Account for full and retained angle buffers during gathering.

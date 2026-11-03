@@ -80,6 +80,9 @@ class FrozenHIP(nn.Module):
         """
         if precision not in ("fp32", "fp16"):
             raise ValueError("Frozen backbone precision must be fp32 or fp16")
+        from fairchem.core.frozen_hip.backbone_memory import validate_charge_spin
+
+        validate_charge_spin(self.backbone, data)
         previous = torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
         try:
             # A head precision setting must not change frozen feature inference.
@@ -105,6 +108,10 @@ class FrozenHIP(nn.Module):
         output_format="dense",
         precision="fp32",
         project_translations=True,
+        backbone_chunk_edges=65536,
+        angle_storage="device",
+        neighbor_list=True,
+        direct_messages=True,
     ):
         """
         Predict one molecular Hessian with bounded edge activations.
@@ -118,10 +125,18 @@ class FrozenHIP(nn.Module):
                 an implicit translation correction.
             precision: Backbone feature precision, "fp32" or "fp16".
             project_translations: Apply the translation sum rule.
+            backbone_chunk_edges: Bound backbone edge activations; None disables it.
+            angle_storage: Store random angles on "device" or "cpu".
+                Cutoff block output retains only the selected pair angles.
+            neighbor_list: Build and reuse an uncapped cutoff pair graph for blocks.
+                False keeps the all-candidate reference path.
+            direct_messages: Accumulate messages into one shared node buffer.
+                False retains the reference per-chunk node temporary.
 
         Returns:
             The Hessian tensor or HessianBlocks object, and directed pair count.
         """
+        from fairchem.core.frozen_hip.backbone_memory import chunked_backbone
         from fairchem.core.frozen_hip.streamed_head import predict
         from fairchem.core.frozen_hip.wigner import enable_fused_wigner
 
@@ -139,7 +154,8 @@ class FrozenHIP(nn.Module):
         if n > 1024 and previous == 4:
             self.backbone.radius_pbc_version = 2
         try:
-            emb = self.features(data, precision)
+            with chunked_backbone(self.backbone, backbone_chunk_edges):
+                emb = self.features(data, precision)
             return predict(
                 self.head,
                 data,
@@ -148,6 +164,9 @@ class FrozenHIP(nn.Module):
                 cutoff=pair_cutoff,
                 project=project_translations,
                 output_format=output_format,
+                angle_storage=angle_storage,
+                neighbor_list=neighbor_list,
+                direct_messages=direct_messages,
             )
         finally:
             self.backbone.radius_pbc_version = previous

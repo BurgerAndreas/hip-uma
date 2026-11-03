@@ -248,3 +248,33 @@ def accumulate(edges, blocks, indices, values, ptr, rows, n, full):
 def finish(indices, values, ptr, diagonal, rows, project):
     mean = rows / len(diagonal)
     return HessianBlocks(indices, values, ptr, diagonal, mean, mean.mean(0), project)
+
+
+@triton.jit
+def _write_paired(
+    BLOCKS, INDEX, VALUES, ROWS, BEGIN, K, P: tl.constexpr, B: tl.constexpr
+):
+    q = tl.program_id(0) * B + tl.arange(0, B)
+    pair, component = q // 9, q % 9
+    valid = pair < P
+    transposed = (component % 3) * 3 + component // 3
+    # First half is j->i; second half is i->j for canonical i<j.
+    reverse = tl.load(BLOCKS + pair * 9 + transposed, valid, 0)
+    forward = tl.load(BLOCKS + (P + pair) * 9 + component, valid, 0)
+    value = forward + reverse
+    slot = BEGIN + pair.to(tl.int64)
+    i = tl.load(INDEX + slot, valid, 0).to(tl.int64)
+    j = tl.load(INDEX + K + slot, valid, 0).to(tl.int64)
+    tl.store(VALUES + slot * 9 + component, value, valid)
+    tl.atomic_add(ROWS + i * 9 + component, value, valid)
+    tl.atomic_add(ROWS + j * 9 + transposed, value, valid)
+
+
+def write_paired_blocks(blocks, indices, values, rows, begin, pairs):
+    """
+    Write each pair once at its known slot, with no sparse-index binary searches.
+    """
+    if pairs:
+        _write_paired[(triton.cdiv(pairs * 9, 256),)](
+            blocks, indices, values, rows, begin, indices.shape[1], pairs, 256
+        )

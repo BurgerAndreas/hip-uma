@@ -56,6 +56,9 @@ def make_unmerged(model, cpu_template):
 
 
 def merge_for_batch(model, cpu_template, data, *, tf32):
+    from fairchem.core.frozen_hip.backbone_memory import validate_charge_spin
+
+    validate_charge_spin(cpu_template, data)
     candidate = copy.deepcopy(cpu_template).to("cuda").eval().requires_grad_(False)
     settings = InferenceSettings(
         merge_mole=True,
