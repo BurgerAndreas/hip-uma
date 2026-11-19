@@ -66,6 +66,18 @@ def unwrap(output: dict, head: str, prop: str) -> torch.Tensor:
     return value
 
 
+def denorm(tasks: dict, output: dict, head: str, prop: str) -> torch.Tensor:
+    """Apply the task normalizer, as MLIPPredictUnit does.
+
+    A direct model(batch) call returns normalized outputs. Without this step the
+    energy, forces and autograd Hessian are too small by the normalizer rmsd.
+    """
+    value = unwrap(output, head, prop)
+    if head not in tasks:
+        raise KeyError(f"No task {head!r} in checkpoint; tasks: {sorted(tasks)}")
+    return tasks[head].normalizer.denorm(value)
+
+
 def load_completed(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
@@ -138,6 +150,12 @@ def main() -> None:
             weakref.ref(model_module.backbone),
         )
     model = model.to(args.device).eval()
+    tasks = model_module.tasks
+    for task in tasks.values():  # same as MLIPPredictUnit.move_to_device
+        task.normalizer.to(args.device)
+        if task.element_references is not None:
+            task.element_references.to(args.device)
+    energy_rmsd = tasks["omol_energy"].normalizer.rmsd
 
     completed = load_completed(args.output)
     if len(completed) > n_samples:
@@ -159,19 +177,28 @@ def main() -> None:
             if args.hessian_method == "predict":
                 with torch.no_grad():
                     output = model(batch)
-                hessian = unwrap(output, "hessian", "hessian")
+                if "hessian" in tasks:
+                    hessian = denorm(tasks, output, "hessian", "hessian")
+                else:
+                    # HIP head without a task normalizer: output is in eV/A^2.
+                    hessian = unwrap(output, "hessian", "hessian")
             else:
                 output = model(batch)
                 energy_for_derivative = unwrap(output, "omol_energy", "energy")
                 energy_forces = -torch.autograd.grad(
                     energy_for_derivative.sum(), batch.pos, create_graph=True
                 )[0]
-                hessian = compute_hessian(
+                # Raw energy is normalized; the mean drops out of the derivative.
+                hessian = energy_rmsd * compute_hessian(
                     energy_forces, batch.pos, vmap=True, training=False
                 )
 
-            energy = unwrap(output, "omol_energy", "energy").reshape(-1)
-            forces = unwrap(output, "forces", "forces").reshape_as(batch.forces)
+            energy = denorm(tasks, output, "omol_energy", "energy")
+            energy_refs = tasks["omol_energy"].element_references
+            if energy_refs is not None:
+                energy = energy_refs.undo_refs(batch, energy)
+            energy = energy.reshape(-1)
+            forces = denorm(tasks, output, "forces", "forces").reshape_as(batch.forces)
             hessian = hessian.reshape_as(batch.hessian)
 
             energy_error = (energy - batch.energy.reshape(-1)).abs().mean()
