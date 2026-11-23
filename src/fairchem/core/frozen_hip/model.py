@@ -10,6 +10,7 @@ Keep the pretrained UMA backbone frozen and train only its additional HIP head.
 from __future__ import annotations
 
 import hashlib
+import os
 
 import torch
 from torch import nn
@@ -18,7 +19,7 @@ from torch.utils.checkpoint import checkpoint
 from fairchem.core.calculate import pretrained_mlip
 from fairchem.core.models.uma.escn_md import Hessian_Head
 from fairchem.core.models.uma.nn.mole import MOLE
-from fairchem.core.units.mlip_unit import InferenceSettings
+from fairchem.core.units.mlip_unit import InferenceSettings, load_predict_unit
 
 
 def parameter_hash(module):
@@ -49,10 +50,13 @@ class FrozenHIP(nn.Module):
         settings = InferenceSettings(
             activation_checkpointing=False, execution_mode=execution_mode, tf32=False
         )
-        predictor = pretrained_mlip.get_predict_unit(
-            "uma-s-1p2",
-            inference_settings=settings,
-            device="cuda" if str(device).startswith("cuda") else "cpu",
+        local_backbone = os.environ.get("HIP_UMA_BACKBONE_PATH")
+        predictor = (
+            load_predict_unit(local_backbone, inference_settings=settings,
+                              device="cuda" if str(device).startswith("cuda") else "cpu")
+            if local_backbone else pretrained_mlip.get_predict_unit(
+                "uma-s-1p2", inference_settings=settings,
+                device="cuda" if str(device).startswith("cuda") else "cpu")
         )
         original = getattr(predictor.model, "module", predictor.model)
         self.backbone = original.backbone.to(device).eval().requires_grad_(False)

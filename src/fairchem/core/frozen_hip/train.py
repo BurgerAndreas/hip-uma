@@ -10,6 +10,7 @@ Train a frozen UMA-s-1.2 plus HIP head with resumable distributed checkpoints.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -121,6 +122,7 @@ def parse_args():
     p.add_argument("--validate-every", type=int, default=400000)
     p.add_argument("--validation-manifest", type=Path)
     p.add_argument("--eval-only", action="store_true")
+    p.add_argument("--per-structure-metrics", action="store_true")
     p.add_argument("--translation-projection", action="store_true")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--seed", type=int, default=7)
@@ -502,7 +504,7 @@ def main():
         )
         if state["backbone_sha256"] != frozen_hash:
             raise ValueError("Checkpoint backbone differs from the frozen UMA model")
-        if state.get("validation_sample_ids_sha256") not in (
+        if not args.eval_only and state.get("validation_sample_ids_sha256") not in (
             None,
             cohort["sample_ids_sha256"],
         ):
@@ -1080,6 +1082,7 @@ def main():
         val = torch.zeros(4, device=device, dtype=torch.float64)
         projected = torch.zeros(6, device=device, dtype=torch.float64)
         seen = []
+        structure_rows = []
         with torch.no_grad():
             val_loader = DataLoader(
                 stream,
@@ -1092,13 +1095,23 @@ def main():
                 seen.extend(int(sid) for sid in host_data.sid)
                 data = move(host_data)
                 prediction = predict(data).float().reshape(-1)
-                projected += mass_weighted_eckart_totals(
+                metric_result = mass_weighted_eckart_totals(
                     prediction,
                     data.hessian,
                     data.pos,
                     data.atomic_numbers,
                     data.hip_sizes,
+                    per_structure=final and args.per_structure_metrics,
                 )
+                if final and args.per_structure_metrics:
+                    batch_totals, batch_rows = metric_result
+                    projected += batch_totals
+                    structure_rows.extend(
+                        [int(sid), int(n), *row]
+                        for sid, n, row in zip(host_data.sid, data.hip_sizes, batch_rows, strict=True)
+                    )
+                else:
+                    projected += metric_result
                 error = prediction - data.hessian
                 parts = error.split([9 * n * n for n in data.hip_sizes])
                 val += torch.stack(
@@ -1126,6 +1139,16 @@ def main():
             raise ValueError("Evaluated samples differ from the fixed cohort")
         projected_record = projected_metric_record(projected, cohort["samples"])
         values = val.cpu().tolist()
+        if final and args.per_structure_metrics:
+            temporary = args.output / f"per_structure_rank{rank:04d}.csv.tmp"
+            destination = args.output / f"per_structure_rank{rank:04d}.csv"
+            with temporary.open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(("sample_id", "natoms", "mass_weighted_eckart_abs_cos_v1", "mass_weighted_eckart_eigenvalue_mae", "mass_weighted_eckart_hessian_mae", "mass_weighted_eckart_hessian_rmse", "low3_overlap", "prediction_negative_count", "target_negative_count"))
+                writer.writerows(structure_rows)
+            temporary.replace(destination)
+            if world > 1:
+                dist.barrier()
         if rank == 0:
             order_hash = pin_validation_order(
                 args.output, "final" if final else "monitor", ids

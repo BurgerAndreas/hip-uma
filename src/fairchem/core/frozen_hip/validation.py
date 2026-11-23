@@ -350,12 +350,16 @@ class EvaluationStream(IterableDataset):
                 raise ValueError(
                     "Final validation labels are incomplete; retain the last checkpoint"
                 )
-            from fairchem.core.frozen_hip.packed import open_packed
-
             entries = self.manifest["entries"][self.rank :: self.world]
             worker = get_worker_info()
             if worker:
                 entries = entries[worker.id :: worker.num_workers]
+            if self.manifest.get("source_format") == "release-hdf5":
+                for entry in entries:
+                    yield from self._release_hdf5_batches(entry)
+                return
+            from fairchem.core.frozen_hip.packed import open_packed
+
             for entry in entries:
                 path = Path(entry["path"])
                 if path.is_absolute() or ".." in path.parts:
@@ -448,6 +452,46 @@ class EvaluationStream(IterableDataset):
                     source, row = refs[index]
                     groups.setdefault(source, []).append(row)
                 yield pack_window_batch(window, list(groups.items()))
+
+    def _release_hdf5_batches(self, entry):
+        relative = Path(entry["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("Evaluation paths must be relative")
+        with h5py.File(Path(self.root) / relative, "r") as f:
+            if (not f.attrs.get("complete") or f.attrs.get("model") != "uma-s-1p2"
+                or f.attrs.get("split") != "validation"
+                or f.attrs.get("hessian_unit") != "eV/Angstrom^2"):
+                raise ValueError("Unexpected validation shard metadata")
+            partition = int(f.attrs["parent_partition"])
+            rows = np.asarray(entry["rows"], dtype=np.int64)
+            ids = f["omol_index"][:].astype(np.int64) + partition * (1 << 60)
+            if ids[rows].tolist() != entry["omol_indices"]:
+                raise ValueError("Evaluation source identities differ")
+            sizes = f["natoms"][:].astype(np.int64)
+            atom_ptr, hessian_ptr = f["atom_ptr"][:], f["hessian_ptr"][:]
+            charges, spins = f["charge"][:], f["spin"][:]
+            sampler = BalancedBatchSampler(sizes[rows], max_atoms=self.max_atoms,
+                                            batch_size=self.max_batch, pair_budget=self.pair_budget)
+            for batch in sampler:
+                selected = rows[batch]
+                ns = sizes[selected]
+                values = {key: np.concatenate([f[key][atom_ptr[i]:atom_ptr[i + 1]] for i in selected])
+                          for key in ("atomic_numbers", "coords")}
+                hessians = []
+                for i, n in zip(selected, ns, strict=True):
+                    upper = f["hessian_upper"][hessian_ptr[i]:hessian_ptr[i + 1]]
+                    if not np.isfinite(upper).all():
+                        raise ValueError("Nonfinite reference Hessian")
+                    h = np.empty((3 * n, 3 * n), dtype=np.float32)
+                    rr, cc = np.triu_indices(3 * n)
+                    h[rr, cc] = upper
+                    h[cc, rr] = upper
+                    hessians.append(h.reshape(-1))
+                values.update(natoms=ns, atom_ptr=np.r_[0, np.cumsum(ns)],
+                              omol_index=ids[selected], charge=charges[selected], spin=spins[selected],
+                              hessian_ptr=np.r_[0, np.cumsum(9 * ns**2)],
+                              hessian_flat=np.concatenate(hessians))
+                yield make_batch(values, np.arange(len(selected)))
 
 
 def load_last_head(head, checkpoint_path, backbone_sha256, device):

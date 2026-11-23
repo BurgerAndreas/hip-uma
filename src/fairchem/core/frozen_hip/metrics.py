@@ -32,7 +32,7 @@ def _reduce_hessian(hessian, inverse_mass, q):
 
 
 @torch.no_grad()
-def mass_weighted_eckart_totals(prediction, target, positions, numbers, sizes):
+def mass_weighted_eckart_totals(prediction, target, positions, numbers, sizes, *, per_structure=False):
     """Return four geometry sums, the valid count, and the rigid-only count.
 
     Hessian errors retain the original 3N Cartesian axes after projection.
@@ -66,6 +66,7 @@ def mass_weighted_eckart_totals(prediction, target, positions, numbers, sizes):
         raise ValueError("Projected metrics require finite positions and masses")
     totals = torch.zeros(6, device=device, dtype=torch.float64)
     values = []
+    rows = []
     axes = torch.eye(3, device=device, dtype=torch.float64)
     for p, t, pos, mass, n in zip(
         prediction.split(widths),
@@ -94,6 +95,7 @@ def mass_weighted_eckart_totals(prediction, target, positions, numbers, sizes):
         rank = int((singular > tolerance).sum().item())
         q = u[:, rank:]
         if not q.shape[1]:
+            rows.append([float("nan")] * 7)
             continue
         inverse_mass = mass.rsqrt().repeat_interleave(3)
 
@@ -102,8 +104,7 @@ def mass_weighted_eckart_totals(prediction, target, positions, numbers, sizes):
         p_eigenvalues, p_vectors = torch.linalg.eigh(p_reduced)
         t_eigenvalues, t_vectors = torch.linalg.eigh(t_reduced)
         error = q @ (p_reduced - t_reduced) @ q.T
-        values.append(
-            torch.stack(
+        value = torch.stack(
                 (
                     torch.dot(p_vectors[:, 0], t_vectors[:, 0]).abs().clamp(0, 1),
                     (p_eigenvalues - t_eigenvalues).abs().mean(),
@@ -111,12 +112,16 @@ def mass_weighted_eckart_totals(prediction, target, positions, numbers, sizes):
                     error.square().mean().sqrt(),
                 )
             )
-        )
+        values.append(value)
+        if per_structure:
+            k = min(3, q.shape[1])
+            overlap = (p_vectors[:, :k].T @ t_vectors[:, :k]).square().sum() / k
+            rows.append(torch.cat((value, overlap[None], (p_eigenvalues < 0).sum()[None], (t_eigenvalues < 0).sum()[None])).cpu().tolist())
     if values:
         totals[:4] = torch.stack(values).sum(0)
     totals[4] = len(values)
     totals[5] = len(sizes) - len(values)
-    return totals
+    return (totals, rows) if per_structure else totals
 
 
 def projected_metric_record(totals, expected_samples):
