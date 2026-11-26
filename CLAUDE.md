@@ -253,7 +253,7 @@ This includes:
 ## Frozen HIP training notes
 
 - Keep the frozen UMA body and trainable HIP head backends separate. The merged
-  inference backend can change composition-dependent expert routing.
+  inference backend can alter composition-dependent expert routing.
 - Compare cached-feature speed with cached-feature speed. Report the feature
   preparation cost separately from update throughput.
 - Full-head FP16 can produce nonfinite gradients. The tested fast mode uses
@@ -265,24 +265,23 @@ This includes:
 - Avoid DDP compiler graph splitting for the dynamic HIP head. Its symbolic
   graph reshapes need the normal compiler path.
 - Validation MAE needs the original asymmetric labels. Keep dense labels in
-  the fixed-cohort cache; triangular labels plus a constant preserve MSE only.
-
+  the fixed-cohort cache, since triangular labels plus a constant preserve MSE only.
 - `AtomicData` needs its own `pin_memory` method. PyTorch otherwise leaves this
   custom batch class unpinned, even when DataLoader requests pinned memory.
 - Nonperiodic molecules can spend substantial CPU time in periodic grid setup.
-  Compare the vectorized radius builder under the same cutoff and neighbor cap.
+  Compare the vectorized radius builder under the same cutoff and neighbour cap.
 - Frozen expert contractions return interleaved batch strides. Packing FP16
   weights once can be much faster than strided loads in each grouped GEMM tile.
-- Block RMSE ignores the antisymmetric MSE constant. Use explicit symmetrized
-  targets and record the objective in checkpoints. Do not mix optimizer states
-  across loss changes during normal training.
+- Block RMSE ignores the antisymmetric MSE constant. Use symmetrized targets
+  and record the objective in checkpoints. Do not mix optimizer states across
+  loss updates during normal training.
 - The non-strict radius graph uses sorted squared distance at index `limit`,
-  then adds 0.01. Preserve this rule when replacing neighbor pruning.
+  then adds 0.01. Preserve this rule when replacing neighbour pruning.
 - Guard single-element Triton sorts at compile time. An unreachable dynamic
   branch can still trigger compilation errors for a one-element sort.
 - Shallow copies of `AtomicData` share its `__keys__` set. Copy that set before
   adding generated fields, or later transfers can access missing attributes.
 - Some dimers overflow FP16 in frozen `so2_conv_2` expert outputs. Keep their
-  tensor-core inputs in FP16 and retain FP32 accumulators through rotation.
+  GEMM inputs in FP16 and retain FP32 accumulators through rotation.
   Reject nonfinite features before cache publication and isolate cache namespaces
-  when the expert output precision changes.
+  when the expert output precision is updated.
