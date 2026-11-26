@@ -33,22 +33,17 @@ def main():
     if len(ids) != 200000 or len(set(ids)) != 200000 or sample_fingerprint(ids) != EXPECTED:
         raise ValueError(f"Full validation cohort mismatch: {len(ids)} rows, fingerprint {sample_fingerprint(ids)}")
     args.output.mkdir(parents=True, exist_ok=True)
-    for name, chosen in (("validation_200000.json", ids),):
-        chosen_set = set(chosen)
-        filtered = []
-        for entry in entries:
-            rows = [i for i, value in enumerate(entry["omol_indices"]) if value in chosen_set]
-            if rows:
-                filtered.append({"path": entry["path"], "rows": rows,
-                                 "omol_indices": [entry["omol_indices"][i] for i in rows]})
-        record = {"selection": "release-holdout-v2", "source_format": "release-hdf5",
-                  "backbone_sha256": BACKBONE, "dataset_revision": REVISION,
-                  "source_dataset_revision": SOURCE_REVISION,
-                  "samples": len(chosen), "sample_ids": chosen,
-                  "sample_ids_sha256": sample_fingerprint(chosen), "entries": filtered,
-                  "complete": True, "available_samples": len(chosen)}
-        write_manifest(args.output / name, record)
-        print(json.dumps({"manifest": name, "samples": len(chosen), "sample_ids_sha256": record["sample_ids_sha256"]}), flush=True)
+    name = "validation_200000.json"
+    record = {
+        "selection": "release-holdout-v2", "source_format": "release-hdf5",
+        "backbone_sha256": BACKBONE, "dataset_revision": REVISION,
+        "source_dataset_revision": SOURCE_REVISION,
+        "samples": len(ids), "sample_ids": ids,
+        "sample_ids_sha256": sample_fingerprint(ids), "entries": entries,
+        "complete": True, "available_samples": len(ids),
+    }
+    write_manifest(args.output / name, record)
+    print(json.dumps({"manifest": name, "samples": len(ids), "sample_ids_sha256": record["sample_ids_sha256"]}), flush=True)
 
 
 if __name__ == "__main__":
