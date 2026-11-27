@@ -129,6 +129,12 @@ if [[ "${THREADED_PREFETCH:-0}" == 1 ]]; then args+=(--threaded-prefetch); fi
 if [[ "${FAST_PACKED_LOADER:-0}" == 1 ]]; then args+=(--fast-packed-loader); fi
 if [[ "${TRANSLATION_PROJECTION:-0}" == 1 ]]; then args+=(--translation-projection); fi
 if [[ "${HEAD_CHARGE_SPIN:-0}" == 1 ]]; then args+=(--head-charge-spin); fi
+if [[ -n "${HEAD_CHARGE_SPIN_MODE:-}" ]]; then args+=(--head-charge-spin-mode "$HEAD_CHARGE_SPIN_MODE"); fi
+if [[ -n "${HEAD_CHARGE_SPIN_GAIN_SCALE:-}" ]]; then args+=(--head-charge-spin-gain-scale "$HEAD_CHARGE_SPIN_GAIN_SCALE"); fi
+if [[ -n "${HEAD_MESSAGE_CUTOFF:-}" ]]; then args+=(--head-message-cutoff "$HEAD_MESSAGE_CUTOFF"); fi
+if [[ -n "${HEAD_READOUT_CUTOFF:-}" ]]; then args+=(--head-readout-cutoff "$HEAD_READOUT_CUTOFF"); fi
+if [[ -n "${HEAD_READOUT_RADIAL:-}" ]]; then args+=(--head-readout-radial "$HEAD_READOUT_RADIAL"); fi
+if [[ -n "${HEAD_READOUT_ENVELOPE_SCALE:-}" ]]; then args+=(--head-readout-envelope-scale "$HEAD_READOUT_ENVELOPE_SCALE"); fi
 if [[ -n "${HEAD_EXPERTS:-}" ]]; then args+=(--head-experts "$HEAD_EXPERTS"); fi
 if [[ -n "${LOSS_SCALE:-}" ]]; then args+=(--loss-scale "$LOSS_SCALE"); fi
 if [[ "${DYNAMIC_LOSS_SCALE:-0}" == 1 ]]; then args+=(--dynamic-loss-scale); fi

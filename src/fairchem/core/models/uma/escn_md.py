@@ -1205,6 +1205,30 @@ class Linear_Force_Head(nn.Module, HeadInterface):
         return {"forces": forces}
 
 
+class InverseDistanceBasis(nn.Module):
+    """Smooth radial basis on compact u = 1 / sqrt(r^2 + sigma^2) in (0, 1/sigma]."""
+
+    def __init__(self, num_basis: int, sigma: float = 1.0) -> None:
+        super().__init__()
+        self.sigma = float(sigma)
+        u_max = 1.0 / self.sigma
+        offset = torch.linspace(0.0, u_max, num_basis)
+        step = u_max / max(num_basis - 1, 1)
+        self.coeff = -0.5 / ((step * 1.5) ** 2)
+        self.register_buffer("offset", offset, persistent=False)
+
+    def forward(self, dist: torch.Tensor) -> torch.Tensor:
+        u = torch.rsqrt(dist.square() + self.sigma * self.sigma)
+        diff = u.unsqueeze(-1) - self.offset.to(device=dist.device, dtype=dist.dtype)
+        return torch.exp(self.coeff * diff.square())
+
+
+def inverse_r3_envelope(dist: torch.Tensor, scale: float = 6.0) -> torch.Tensor:
+    """Smoothly decaying O(1/r^3) envelope: (scale^2 / (r^2 + scale^2))^(3/2)."""
+    s2 = float(scale) ** 2
+    return (s2 / (dist.square() + s2)).pow(1.5)
+
+
 class Hessian_Head(nn.Module, HeadInterface):
     def __init__(
         self,
@@ -1215,17 +1239,34 @@ class Hessian_Head(nn.Module, HeadInterface):
         use_pbc_hessian: bool = False,
         radius_pbc_version_hessian: int | None = None,
         width_multiplier: int = 1,
+        message_cutoff_hessian: float | None = None,
+        readout_radial_mode: str = "gaussian",
+        readout_envelope_scale: float = 6.0,
+        structural_asr: bool = False,
     ) -> None:
         super().__init__()
         if backbone.lmax < 2:
             raise ValueError("Hessian_Head requires backbone.lmax >= 2")
         if num_layers_hessian < 0:
             raise ValueError("num_layers_hessian must be non-negative")
+        if readout_radial_mode not in ("gaussian", "inverse_distance"):
+            raise ValueError(f"Unsupported readout_radial_mode: {readout_radial_mode}")
 
         object.__setattr__(self, "_backbone_ref", weakref.ref(backbone))
         self.backend = backbone.backend
         self.num_layers_hessian = num_layers_hessian
-        self.cutoff_hessian = cutoff_hessian
+        self.cutoff_hessian = float(cutoff_hessian)
+        self.readout_radial_mode = readout_radial_mode
+        self.readout_envelope_scale = float(readout_envelope_scale)
+        self.structural_asr = bool(structural_asr)
+        self.message_cutoff_hessian = (
+            float(message_cutoff_hessian) if message_cutoff_hessian is not None else None
+        )
+        block_cutoff = (
+            self.message_cutoff_hessian
+            if self.message_cutoff_hessian is not None
+            else self.cutoff_hessian
+        )
         self.fully_connected_hessian = fully_connected_hessian
         self.use_pbc_hessian = use_pbc_hessian
         self.radius_pbc_version_hessian = (
@@ -1256,7 +1297,7 @@ class Hessian_Head(nn.Module, HeadInterface):
                     backbone.mappingReduced,
                     backbone.SO3_grid,
                     edge_channels,
-                    self.cutoff_hessian,
+                    block_cutoff,
                     backbone.norm_type,
                     backbone.act_type,
                     backbone.ff_type,
@@ -1286,12 +1327,26 @@ class Hessian_Head(nn.Module, HeadInterface):
         )
         self.node_projection = SO3_Linear(channels, 1, lmax=2)
         self.edge_projection = SO3_Linear(channels, 1, lmax=2)
-        self.distance_expansion_hessian = GaussianSmearing(
-            0.0,
-            self.cutoff_hessian,
-            backbone.num_distance_basis,
-            2.0,
-        )
+        if self.readout_radial_mode == "inverse_distance":
+            self.distance_expansion_hessian = InverseDistanceBasis(
+                backbone.num_distance_basis, sigma=1.0
+            )
+        else:
+            self.distance_expansion_hessian = GaussianSmearing(
+                0.0,
+                self.cutoff_hessian,
+                backbone.num_distance_basis,
+                2.0,
+            )
+        if self.message_cutoff_hessian is not None:
+            self.distance_expansion_message = GaussianSmearing(
+                0.0,
+                self.message_cutoff_hessian,
+                backbone.num_distance_basis,
+                2.0,
+            )
+        else:
+            self.distance_expansion_message = None
         self.register_buffer(
             "cartesian_wigner_3j_basis",
             get_cartesian_wigner_3j_basis(),
@@ -1317,7 +1372,8 @@ class Hessian_Head(nn.Module, HeadInterface):
             assembly_indices=not hasattr(data, "hip_pair_targets"),
         )
 
-        fused_wigner = getattr(self, "fused_wigner", False)
+        use_invr = getattr(self, "readout_radial_mode", "gaussian") == "inverse_distance"
+        fused_wigner = getattr(self, "fused_wigner", False) and not use_invr
         if fused_wigner:
             from fairchem.core.frozen_hip.wigner import frozen_wigner
 
@@ -1341,8 +1397,16 @@ class Hessian_Head(nn.Module, HeadInterface):
         )
 
         if not fused_wigner:
-            dist_scaled = data.edge_distance_hessian / self.cutoff_hessian
-            edge_envelope = self.backbone.envelope(dist_scaled).reshape(-1, 1, 1)
+            if use_invr:
+                edge_envelope = inverse_r3_envelope(
+                    data.edge_distance_hessian,
+                    getattr(self, "readout_envelope_scale", 6.0),
+                ).reshape(-1, 1, 1)
+            else:
+                dist_scaled = (data.edge_distance_hessian / self.cutoff_hessian).clamp(
+                    max=1.0
+                )
+                edge_envelope = self.backbone.envelope(dist_scaled).reshape(-1, 1, 1)
         edge_distance_embedding = self.distance_expansion_hessian(
             data.edge_distance_hessian
         )
@@ -1358,7 +1422,47 @@ class Hessian_Head(nn.Module, HeadInterface):
             dim=1,
         )
         wigner_inv_envelope = wigner_inv if fused_wigner else wigner_inv * edge_envelope
-        return x_edge, wigner, wigner_inv_envelope
+        if self.message_cutoff_hessian is None:
+            return x_edge, wigner, wigner_inv_envelope, None
+
+        msg_mask = data.edge_distance_hessian < self.message_cutoff_hessian
+        msg_edge_index = data.edge_index_hessian[:, msg_mask]
+        msg_dist = data.edge_distance_hessian[msg_mask]
+        if fused_wigner:
+            from fairchem.core.frozen_hip.wigner import frozen_wigner
+
+            msg_wigner, msg_wigner_inv = frozen_wigner(
+                self,
+                data.edge_distance_vec_hessian[msg_mask],
+                msg_dist,
+                cutoff=self.message_cutoff_hessian,
+            )
+            msg_wigner, msg_wigner_inv_envelope = self.backend.prepare_wigner(
+                msg_wigner,
+                msg_wigner_inv,
+                self.backbone.mappingReduced,
+                coefficient_index,
+            )
+        else:
+            msg_wigner = wigner[msg_mask]
+            msg_env = self.backbone.envelope(
+                msg_dist / self.message_cutoff_hessian
+            ).reshape(-1, 1, 1)
+            msg_wigner_inv_envelope = wigner_inv[msg_mask] * msg_env
+        msg_x_edge = torch.cat(
+            (
+                self.distance_expansion_message(msg_dist),
+                source_embedding[msg_mask],
+                target_embedding[msg_mask],
+            ),
+            dim=1,
+        )
+        return (
+            x_edge,
+            wigner,
+            wigner_inv_envelope,
+            (msg_edge_index, msg_x_edge, msg_wigner, msg_wigner_inv_envelope),
+        )
 
     def projected_edge_irreps(
         self, node_embedding, x_edge, edge_index, wigner, wigner_inv
@@ -1377,7 +1481,9 @@ class Hessian_Head(nn.Module, HeadInterface):
             from fairchem.core.frozen_hip.mole import prepare_head_mole
 
             prepare_head_mole(self, data)
-        x_edge, wigner, wigner_inv_envelope = self._hessian_edge_features(data, emb)
+        x_edge, wigner, wigner_inv_envelope, msg_graph = self._hessian_edge_features(
+            data, emb
+        )
         if getattr(self, "requires_mole_routing", True):
             self.backbone.set_MOLE_sizes(
                 nsystems=data.natoms.numel(),
@@ -1391,14 +1497,22 @@ class Hessian_Head(nn.Module, HeadInterface):
             )
         node_embedding = self.input_projection(node_embedding)
 
+        if msg_graph is not None:
+            msg_edge_index, msg_x_edge, msg_wigner, msg_wigner_inv_envelope = msg_graph
+        else:
+            msg_edge_index = data.edge_index_hessian
+            msg_x_edge = x_edge
+            msg_wigner = wigner
+            msg_wigner_inv_envelope = wigner_inv_envelope
+
         for layer_idx, block in enumerate(self.blocks):
             with record_function(f"hessian message passing {layer_idx}"):
                 node_embedding = block(
                     node_embedding,
-                    x_edge,
-                    data.edge_index_hessian,
-                    wigner,
-                    wigner_inv_envelope,
+                    msg_x_edge,
+                    msg_edge_index,
+                    msg_wigner,
+                    msg_wigner_inv_envelope,
                     total_atoms_across_gp_ranks=data.pos.shape[0],
                 )
 
@@ -1425,10 +1539,21 @@ class Hessian_Head(nn.Module, HeadInterface):
             edge_l012 = get_l_component_range(edge_features, l_min=0, l_max=2)
             edge_irreps = self.edge_projection(edge_l012).squeeze(-1)
         basis = self.cartesian_wigner_3j_basis.to(
-            device=node_irreps.device, dtype=node_irreps.dtype
+            device=edge_irreps.device, dtype=edge_irreps.dtype
         )
-        node_blocks = irreps_to_cartesian_matrix(node_irreps, basis)
         edge_blocks = irreps_to_cartesian_matrix(edge_irreps, basis)
+        if getattr(self, "structural_asr", False):
+            # Enforce exact blockwise ASR: H_ii = -sum_{j != i} H_sym_ij.
+            # Diagonal assembly uses N + N.T, so N = -0.5 * row_sum yields H_ii = -row_sum.
+            n_atoms = node_embedding.shape[0]
+            row_sum = edge_blocks.new_zeros((n_atoms, 3, 3))
+            row_sum.index_add_(0, data.edge_index_hessian[0], edge_blocks)
+            row_sum.index_add_(
+                0, data.edge_index_hessian[1], edge_blocks.transpose(-1, -2)
+            )
+            node_blocks = -0.5 * row_sum
+        else:
+            node_blocks = irreps_to_cartesian_matrix(node_irreps, basis)
         if hasattr(data, "hip_pair_targets"):
             return {"edge_blocks": edge_blocks, "node_blocks": node_blocks}
         hessian = blocks3x3_to_hessian(

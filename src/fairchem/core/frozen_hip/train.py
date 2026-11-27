@@ -118,6 +118,21 @@ def parse_args():
     )
     p.add_argument("--head-experts", type=int, default=0)
     p.add_argument("--head-charge-spin", action="store_true")
+    p.add_argument(
+        "--head-charge-spin-mode",
+        choices=("extensive", "intensive_bounded"),
+        default="extensive",
+    )
+    p.add_argument("--head-charge-spin-gain-scale", type=float, default=1.0)
+    p.add_argument("--head-message-cutoff", type=float, default=None)
+    p.add_argument("--head-readout-cutoff", type=float, default=100.0)
+    p.add_argument(
+        "--head-readout-radial",
+        choices=("gaussian", "inverse_distance"),
+        default="gaussian",
+    )
+    p.add_argument("--head-readout-envelope-scale", type=float, default=6.0)
+    p.add_argument("--head-structural-asr", action="store_true")
     p.add_argument("--checkpoint-every", type=int, default=500)
     p.add_argument("--validate-every", type=int, default=400000)
     p.add_argument("--validation-manifest", type=Path)
@@ -292,6 +307,13 @@ def main():
             ("translation_projection", False),
             ("head_experts", 0),
             ("head_charge_spin", False),
+            ("head_charge_spin_mode", "extensive"),
+            ("head_charge_spin_gain_scale", 1.0),
+            ("head_message_cutoff", None),
+            ("head_readout_cutoff", 100.0),
+            ("head_readout_radial", "gaussian"),
+            ("head_readout_envelope_scale", 6.0),
+            ("head_structural_asr", False),
             ("head_precision", "fp32"),
             ("loss_scale", 1.0),
             ("backbone_precision", "fp32"),
@@ -373,6 +395,13 @@ def main():
         backbone_graph_version=args.backbone_graph_version,
         head_experts=args.head_experts,
         head_charge_spin=args.head_charge_spin,
+        head_charge_spin_mode=args.head_charge_spin_mode,
+        head_charge_spin_gain_scale=args.head_charge_spin_gain_scale,
+        head_message_cutoff=args.head_message_cutoff,
+        head_readout_cutoff=args.head_readout_cutoff,
+        head_readout_radial=args.head_readout_radial,
+        head_readout_envelope_scale=args.head_readout_envelope_scale,
+        head_structural_asr=args.head_structural_asr,
     )
     frozen_hash = parameter_hash(model.backbone)
     for manifest in (cohort, final_cohort):
@@ -528,6 +557,14 @@ def main():
             raise ValueError("Resume requires the same HIP expert count")
         if state.get("head_charge_spin", False) != args.head_charge_spin:
             raise ValueError("Resume requires the same charge/spin conditioning")
+        if state.get("head_charge_spin_mode", "extensive") != args.head_charge_spin_mode:
+            raise ValueError("Resume requires the same charge/spin conditioning mode")
+        if state.get("head_message_cutoff") != args.head_message_cutoff:
+            raise ValueError("Resume requires the same head message cutoff")
+        if state.get("head_readout_cutoff", 100.0) != args.head_readout_cutoff:
+            raise ValueError("Resume requires the same head readout cutoff")
+        if state.get("head_readout_radial", "gaussian") != args.head_readout_radial:
+            raise ValueError("Resume requires the same head readout radial mode")
         saved_loss = state.get("loss_name", "mse")
         if args.eval_only:
             args.loss = saved_loss
@@ -971,6 +1008,13 @@ def main():
             "translation_projection": args.translation_projection,
             "head_experts": args.head_experts,
             "head_charge_spin": args.head_charge_spin,
+            "head_charge_spin_mode": args.head_charge_spin_mode,
+            "head_charge_spin_gain_scale": args.head_charge_spin_gain_scale,
+            "head_message_cutoff": args.head_message_cutoff,
+            "head_readout_cutoff": args.head_readout_cutoff,
+            "head_readout_radial": args.head_readout_radial,
+            "head_readout_envelope_scale": args.head_readout_envelope_scale,
+            "head_structural_asr": args.head_structural_asr,
             "loss_scale": args.loss_scale,
             "dynamic_loss_scale": args.dynamic_loss_scale,
             "grad_scaler": scaler.state_dict(),
@@ -1581,6 +1625,13 @@ def main():
         args.translation_projection = state.get("translation_projection", False)
         args.head_experts = state.get("head_experts", 0)
         args.head_charge_spin = state.get("head_charge_spin", False)
+        args.head_charge_spin_mode = state.get("head_charge_spin_mode", "extensive")
+        args.head_charge_spin_gain_scale = state.get("head_charge_spin_gain_scale", 1.0)
+        args.head_message_cutoff = state.get("head_message_cutoff")
+        args.head_readout_cutoff = state.get("head_readout_cutoff", 100.0)
+        args.head_readout_radial = state.get("head_readout_radial", "gaussian")
+        args.head_readout_envelope_scale = state.get("head_readout_envelope_scale", 6.0)
+        args.head_structural_asr = state.get("head_structural_asr", False)
         args.backbone_precision = state.get("backbone_precision", "fp32")
         args.backbone_graph_version = state.get("backbone_graph_version", 2)
         model.backbone.radius_pbc_version = args.backbone_graph_version

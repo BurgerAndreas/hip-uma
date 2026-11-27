@@ -45,6 +45,13 @@ class FrozenHIP(nn.Module):
         backbone_graph_version=None,
         head_experts=0,
         head_charge_spin=False,
+        head_charge_spin_mode="extensive",
+        head_charge_spin_gain_scale=1.0,
+        head_message_cutoff=None,
+        head_readout_cutoff=100.0,
+        head_readout_radial="gaussian",
+        head_readout_envelope_scale=6.0,
+        head_structural_asr=False,
     ):
         super().__init__()
         settings = InferenceSettings(
@@ -71,7 +78,12 @@ class FrozenHIP(nn.Module):
         self.head = Hessian_Head(
             self.backbone,
             num_layers_hessian=layers,
+            cutoff_hessian=head_readout_cutoff,
             width_multiplier=head_width_multiplier,
+            message_cutoff_hessian=head_message_cutoff,
+            readout_radial_mode=head_readout_radial,
+            readout_envelope_scale=head_readout_envelope_scale,
+            structural_asr=head_structural_asr,
         ).to(device)
         if head_experts:
             from fairchem.core.frozen_hip.mole import enable_head_mole
@@ -82,7 +94,11 @@ class FrozenHIP(nn.Module):
                 enable_charge_spin_conditioning,
             )
 
-            enable_charge_spin_conditioning(self.head)
+            enable_charge_spin_conditioning(
+                self.head,
+                mode=head_charge_spin_mode,
+                gain_scale=head_charge_spin_gain_scale,
+            )
         # Dense HIP layers do not consume the backbone's expert routing sizes.
         # Avoid copying those sizes to the host after each complete HIP graph.
         self.head.requires_mole_routing = any(

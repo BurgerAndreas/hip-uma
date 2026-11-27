@@ -72,7 +72,7 @@ def roll_angles(head, edges, device):
     return None
 
 
-def rotations(head, vec, dist, gamma=None):
+def rotations(head, vec, dist, gamma=None, cutoff=None):
     """
     Return Wigner matrices; reuse ``gamma`` when the backend accepts it.
     """
@@ -80,7 +80,7 @@ def rotations(head, vec, dist, gamma=None):
     if getattr(head, "fused_wigner", False):
         from fairchem.core.frozen_hip.wigner import frozen_wigner
 
-        return frozen_wigner(head, vec, dist, gamma=gamma)
+        return frozen_wigner(head, vec, dist, gamma=gamma, cutoff=cutoff)
     if gamma is not None and backbone.use_quaternion_wigner:
         from fairchem.core.models.uma.common.quaternion.wigner_d_hybrid import (
             axis_angle_wigner_hybrid,
@@ -98,7 +98,16 @@ def rotations(head, vec, dist, gamma=None):
     return backbone._get_rotmat_and_wigner(vec)
 
 
-def edge_features(head, data, edge_index, gamma=None):
+def edge_features(
+    head,
+    data,
+    edge_index,
+    gamma=None,
+    *,
+    cutoff_scale=None,
+    distance_expansion=None,
+    use_invr_envelope=False,
+):
     """
     Compute radial features and rotations for one edge chunk.
 
@@ -106,8 +115,14 @@ def edge_features(head, data, edge_index, gamma=None):
     """
     vec = data.pos[edge_index[0]] - data.pos[edge_index[1]]
     dist = vec.norm(dim=-1)
-    fused = getattr(head, "fused_wigner", False)
-    wigner, wigner_inv = rotations(head, vec, dist, gamma)
+    fused = getattr(head, "fused_wigner", False) and not use_invr_envelope
+    scale = head.cutoff_hessian if cutoff_scale is None else float(cutoff_scale)
+    if fused:
+        from fairchem.core.frozen_hip.wigner import frozen_wigner
+
+        wigner, wigner_inv = frozen_wigner(head, vec, dist, gamma=gamma, cutoff=scale)
+    else:
+        wigner, wigner_inv = rotations(head, vec, dist, gamma, cutoff=scale)
     backbone = head.backbone
     coefficient_index = (
         backbone.coefficient_index if backbone.mmax != backbone.lmax else None
@@ -116,12 +131,26 @@ def edge_features(head, data, edge_index, gamma=None):
         wigner, wigner_inv, backbone.mappingReduced, coefficient_index
     )
     if not fused:
-        envelope = backbone.envelope(dist / head.cutoff_hessian).reshape(-1, 1, 1)
+        if use_invr_envelope:
+            from fairchem.core.models.uma.escn_md import inverse_r3_envelope
+
+            envelope = inverse_r3_envelope(
+                dist, getattr(head, "readout_envelope_scale", 6.0)
+            ).reshape(-1, 1, 1)
+        else:
+            envelope = backbone.envelope((dist / scale).clamp(max=1.0)).reshape(
+                -1, 1, 1
+            )
         wigner_inv = wigner_inv * envelope
     numbers = data.get("atomic_numbers_full", data.atomic_numbers)
+    dist_fn = (
+        head.distance_expansion_hessian
+        if distance_expansion is None
+        else distance_expansion
+    )
     x_edge = torch.cat(
         (
-            head.distance_expansion_hessian(dist),
+            dist_fn(dist),
             backbone.source_embedding(numbers[edge_index[0]]),
             backbone.target_embedding(numbers[edge_index[1]]),
         ),
@@ -161,6 +190,10 @@ def _run_message_blocks(head, data, emb, msg_edges, gamma_msg, chunk_edges, char
             x, _clamped_charge(data.charge, charge_clamp), data.spin, data.batch
         )
     x = head.input_projection(x)
+    msg_scale = getattr(head, "message_cutoff_hessian", None)
+    msg_dist_fn = (
+        getattr(head, "distance_expansion_message", None) if msg_scale is not None else None
+    )
     for block in head.blocks:
         residual = x
         normalized = block.norm_1(x)
@@ -168,7 +201,14 @@ def _run_message_blocks(head, data, emb, msg_edges, gamma_msg, chunk_edges, char
         for begin in range(0, total, chunk_edges):
             edges = msg_edges[:, begin : begin + chunk_edges]
             roll = None if gamma_msg is None else gamma_msg[begin : begin + chunk_edges]
-            x_edge, wigner, wigner_inv = edge_features(head, data, edges, roll)
+            x_edge, wigner, wigner_inv = edge_features(
+                head,
+                data,
+                edges,
+                roll,
+                cutoff_scale=msg_scale,
+                distance_expansion=msg_dist_fn,
+            )
             part = block.edge_wise.forward_chunk(
                 normalized, n, x_edge, edges, wigner, wigner_inv
             )
@@ -257,6 +297,7 @@ def predict(
         raise ValueError("chunk_edges must be positive")
     if output_format not in ("dense", "blocks"):
         raise ValueError("output_format must be dense or blocks")
+    asr = bool(asr or getattr(head, "structural_asr", False))
     n = data.pos.shape[0]
     if edge_index is None:
         edge_index = pair_list(data.pos, cutoff)
@@ -264,21 +305,35 @@ def predict(
     starts = range(0, total, chunk_edges)
     gamma = roll_angles(head, total, data.pos.device)
 
+    eff_msg_cutoff = (
+        msg_cutoff
+        if msg_cutoff is not None
+        else getattr(head, "message_cutoff_hessian", None)
+    )
     if msg_edge_index is not None:
         msg_edges = msg_edge_index
         gamma_msg = roll_angles(head, msg_edges.shape[1], data.pos.device)
-    elif msg_cutoff is not None and msg_cutoff != cutoff:
-        msg_edges = pair_list(data.pos, msg_cutoff)
+    elif eff_msg_cutoff is not None and eff_msg_cutoff != cutoff:
+        msg_edges = pair_list(data.pos, eff_msg_cutoff)
         gamma_msg = roll_angles(head, msg_edges.shape[1], data.pos.device)
     else:
         msg_edges = edge_index
         gamma_msg = gamma
 
+    use_invr_readout = (
+        getattr(head, "readout_radial_mode", "gaussian") == "inverse_distance"
+    )
+
     def chunks():
         for begin in starts:
             edges = edge_index[:, begin : begin + chunk_edges]
             roll = None if gamma is None else gamma[begin : begin + chunk_edges]
-            yield (edges, *edge_features(head, data, edges, roll))
+            yield (
+                edges,
+                *edge_features(
+                    head, data, edges, roll, use_invr_envelope=use_invr_readout
+                ),
+            )
 
     x, node_blocks, basis = _run_message_blocks(
         head, data, emb, msg_edges, gamma_msg, chunk_edges, charge_clamp=charge_clamp
@@ -378,6 +433,7 @@ def predict_hvp(
     _check(head, data)
     if chunk_edges < 1:
         raise ValueError("chunk_edges must be positive")
+    asr = bool(asr or getattr(head, "structural_asr", False))
     n = data.pos.shape[0]
     v = torch.as_tensor(direction, device=data.pos.device, dtype=torch.float64).reshape(n, 3)
 
@@ -386,11 +442,16 @@ def predict_hvp(
     total = edge_index.shape[1]
     gamma = roll_angles(head, total, data.pos.device)
 
+    eff_msg_cutoff = (
+        msg_cutoff
+        if msg_cutoff is not None
+        else getattr(head, "message_cutoff_hessian", None)
+    )
     if msg_edge_index is not None:
         msg_edges = msg_edge_index
         gamma_msg = roll_angles(head, msg_edges.shape[1], data.pos.device)
-    elif msg_cutoff is not None and msg_cutoff != cutoff:
-        msg_edges = pair_list(data.pos, msg_cutoff)
+    elif eff_msg_cutoff is not None and eff_msg_cutoff != cutoff:
+        msg_edges = pair_list(data.pos, eff_msg_cutoff)
         gamma_msg = roll_angles(head, msg_edges.shape[1], data.pos.device)
     else:
         msg_edges = edge_index
@@ -406,10 +467,15 @@ def predict_hvp(
         d64 = node_blocks.double()
         hv = ((d64 + d64.transpose(1, 2)) @ v[..., None]).squeeze(-1)
 
+    use_invr_readout = (
+        getattr(head, "readout_radial_mode", "gaussian") == "inverse_distance"
+    )
     for begin in range(0, total, chunk_edges):
         edges = edge_index[:, begin : begin + chunk_edges]
         roll = None if gamma is None else gamma[begin : begin + chunk_edges]
-        x_edge, wigner, wigner_inv = edge_features(head, data, edges, roll)
+        x_edge, wigner, wigner_inv = edge_features(
+            head, data, edges, roll, use_invr_envelope=use_invr_readout
+        )
         blocks = _readout_chunk(head, x, basis, n, edges, x_edge, wigner, wigner_inv).double()
         s, t = edges[0], edges[1]
         if asr:

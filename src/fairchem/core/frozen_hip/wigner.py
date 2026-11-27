@@ -197,7 +197,7 @@ def enable_fused_wigner(head, enabled=True):
     head.fused_wigner = enabled
 
 
-def frozen_wigner(head, vectors, distances, gamma=None):
+def frozen_wigner(head, vectors, distances, gamma=None, cutoff=None):
     """Use FP32 geometry and retain the original random roll distribution."""
     if vectors.requires_grad or vectors.dtype != torch.float32:
         raise ValueError("Fused geometry requires frozen FP32 coordinates")
@@ -209,5 +209,5 @@ def frozen_wigner(head, vectors, distances, gamma=None):
         gamma,
         head.hip_wigner_powers,
         head.hip_wigner_coefficients,
-        float(head.cutoff_hessian),
+        float(head.cutoff_hessian if cutoff is None else cutoff),
     )
