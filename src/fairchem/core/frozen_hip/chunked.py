@@ -145,68 +145,30 @@ def _check(head, data):
         raise ValueError("Chunked Hessians require a head without MoLE routing")
 
 
-@torch.no_grad()
-def predict(
-    head,
-    data,
-    emb,
-    chunk_edges=65536,
-    cutoff=None,
-    output_format="dense",
-    edge_index=None,
-):
-    """
-    Predict one Hessian with edge chunks; no translation projection.
+def _clamped_charge(charge, charge_clamp):
+    if charge_clamp is None:
+        return charge
+    limit = float(charge_clamp)
+    return charge.clamp(min=-limit, max=limit)
 
-    Rotations use one random roll angle per edge, drawn once and reused in
-    every layer and the readout, as the dense path does. From the same RNG
-    state and edge order the result equals the dense head up to summation
-    order; otherwise it differs by the dense head's own roll noise.
 
-    Args:
-        head: A ``Hessian_Head`` in eval mode (no MoLE routing).
-        data: AtomicData with one structure; ``pos`` holds the Hessian atoms.
-        emb: Backbone output; ``emb["node_embedding"]`` has one row per atom of
-            ``data``. For a subset region, pass the subset rows of the
-            full-system embedding.
-        chunk_edges: Directed edges per chunk.
-        cutoff: Pair cutoff in Angstrom, or None for all pairs. The radial basis
-            and envelope keep the trained ``head.cutoff_hessian`` scale.
-        output_format: "dense" returns a (3n, 3n) FP32 tensor. "blocks" returns
-            (edge_index, edge_blocks, node_blocks) with H = sum over edges of
-            C on block (s, t) and C.T on block (t, s), plus N + N.T on (i, i).
-        edge_index: Optional precomputed (2, E) graph; overrides ``cutoff``.
-
-    Returns:
-        The Hessian in the requested format.
-    """
-    _check(head, data)
-    if chunk_edges < 1:
-        raise ValueError("chunk_edges must be positive")
-    if output_format not in ("dense", "blocks"):
-        raise ValueError("output_format must be dense or blocks")
+def _run_message_blocks(head, data, emb, msg_edges, gamma_msg, chunk_edges, charge_clamp=None):
     n = data.pos.shape[0]
-    if edge_index is None:
-        edge_index = pair_list(data.pos, cutoff)
-    total = edge_index.shape[1]
-    starts = range(0, total, chunk_edges)
-    gamma = roll_angles(head, total, data.pos.device)
-
-    def chunks():
-        for begin in starts:
-            edges = edge_index[:, begin : begin + chunk_edges]
-            roll = None if gamma is None else gamma[begin : begin + chunk_edges]
-            yield (edges, *edge_features(head, data, edges, roll))
-
+    total = msg_edges.shape[1]
     x = emb["node_embedding"].clone()
     if hasattr(head, "hip_charge_spin"):
-        x = head.hip_charge_spin(x, data.charge, data.spin, data.batch)
+        x = head.hip_charge_spin(
+            x, _clamped_charge(data.charge, charge_clamp), data.spin, data.batch
+        )
     x = head.input_projection(x)
     for block in head.blocks:
         residual = x
         normalized = block.norm_1(x)
         messages = None
-        for edges, x_edge, wigner, wigner_inv in chunks():
+        for begin in range(0, total, chunk_edges):
+            edges = msg_edges[:, begin : begin + chunk_edges]
+            roll = None if gamma_msg is None else gamma_msg[begin : begin + chunk_edges]
+            x_edge, wigner, wigner_inv = edge_features(head, data, edges, roll)
             part = block.edge_wise.forward_chunk(
                 normalized, n, x_edge, edges, wigner, wigner_inv
             )
@@ -224,32 +186,130 @@ def predict(
         device=node_irreps.device, dtype=node_irreps.dtype
     )
     node_blocks = irreps_to_cartesian_matrix(node_irreps, basis)
-    projected = getattr(head, "projected_readout", False)
+    return x, node_blocks, basis
 
-    def readout(edges, x_edge, wigner, wigner_inv):
-        if projected:
-            irreps = head.projected_edge_irreps(x, x_edge, edges, wigner, wigner_inv)
-        else:
-            features = head.edge_readout.forward_messages(
-                x, x_edge, edges, wigner, wigner_inv, total_atoms_across_gp_ranks=n
-            )
-            irreps = head.edge_projection(
-                get_l_component_range(features, l_min=0, l_max=2)
-            ).squeeze(-1)
-        return irreps_to_cartesian_matrix(irreps, basis)
+
+def _readout_chunk(head, x, basis, n, edges, x_edge, wigner, wigner_inv):
+    if getattr(head, "projected_readout", False):
+        irreps = head.projected_edge_irreps(x, x_edge, edges, wigner, wigner_inv)
+    else:
+        features = head.edge_readout.forward_messages(
+            x, x_edge, edges, wigner, wigner_inv, total_atoms_across_gp_ranks=n
+        )
+        irreps = head.edge_projection(
+            get_l_component_range(features, l_min=0, l_max=2)
+        ).squeeze(-1)
+    return irreps_to_cartesian_matrix(irreps, basis)
+
+
+@torch.no_grad()
+def predict(
+    head,
+    data,
+    emb,
+    chunk_edges=65536,
+    cutoff=None,
+    output_format="dense",
+    edge_index=None,
+    *,
+    msg_cutoff=None,
+    msg_edge_index=None,
+    asr=False,
+    charge_clamp=None,
+):
+    """
+    Predict one Hessian with edge chunks.
+
+    Rotations use one random roll angle per edge, drawn once and reused in
+    every layer and the readout, as the dense path does. From the same RNG
+    state and edge order the result equals the dense head up to summation
+    order; otherwise it differs by the dense head's own roll noise.
+
+    Args:
+        head: A ``Hessian_Head`` in eval mode (no MoLE routing).
+        data: AtomicData with one structure; ``pos`` holds the Hessian atoms.
+        emb: Backbone output; ``emb["node_embedding"]`` has one row per atom of
+            ``data``. For a subset region, pass the subset rows of the
+            full-system embedding.
+        chunk_edges: Directed edges per chunk.
+        cutoff: Pair cutoff in Angstrom for readout (and message passing unless
+            ``msg_cutoff`` is set), or None for all pairs. The radial basis and
+            envelope always keep the trained ``head.cutoff_hessian`` scale.
+        output_format: "dense" returns a (3n, 3n) FP32 tensor. "blocks" returns
+            (edge_index, edge_blocks, node_blocks) with H = sum over edges of
+            C on block (s, t) and C.T on block (t, s), plus N + N.T on (i, i).
+        edge_index: Optional precomputed (2, E) readout graph; overrides ``cutoff``.
+        msg_cutoff: Optional separate pair cutoff for message-passing blocks
+            (e.g. 9.0 A to keep node degrees in-distribution while reading out
+            longer-range pairs). Defaults to ``cutoff``.
+        msg_edge_index: Optional precomputed (2, E_msg) message-passing graph.
+        asr: If True, enforce exact blockwise acoustic sum rule by replacing
+            diagonal blocks with ``-sum_{j!=i} H_sym_ij``.
+        charge_clamp: Optional symmetric clamp ``[-c, +c]`` on ``data.charge``
+            passed to ``head.hip_charge_spin`` to prevent OOD extrapolation on
+            highly charged macromolecules.
+
+    Returns:
+        The Hessian in the requested format.
+    """
+    _check(head, data)
+    if chunk_edges < 1:
+        raise ValueError("chunk_edges must be positive")
+    if output_format not in ("dense", "blocks"):
+        raise ValueError("output_format must be dense or blocks")
+    n = data.pos.shape[0]
+    if edge_index is None:
+        edge_index = pair_list(data.pos, cutoff)
+    total = edge_index.shape[1]
+    starts = range(0, total, chunk_edges)
+    gamma = roll_angles(head, total, data.pos.device)
+
+    if msg_edge_index is not None:
+        msg_edges = msg_edge_index
+        gamma_msg = roll_angles(head, msg_edges.shape[1], data.pos.device)
+    elif msg_cutoff is not None and msg_cutoff != cutoff:
+        msg_edges = pair_list(data.pos, msg_cutoff)
+        gamma_msg = roll_angles(head, msg_edges.shape[1], data.pos.device)
+    else:
+        msg_edges = edge_index
+        gamma_msg = gamma
+
+    def chunks():
+        for begin in starts:
+            edges = edge_index[:, begin : begin + chunk_edges]
+            roll = None if gamma is None else gamma[begin : begin + chunk_edges]
+            yield (edges, *edge_features(head, data, edges, roll))
+
+    x, node_blocks, basis = _run_message_blocks(
+        head, data, emb, msg_edges, gamma_msg, chunk_edges, charge_clamp=charge_clamp
+    )
 
     if output_format == "blocks":
         blocks = node_blocks.new_empty((total, 3, 3))
+        row_sum = (
+            torch.zeros((n, 3, 3), device=x.device, dtype=torch.float64) if asr else None
+        )
         for begin, (edges, *f) in zip(starts, chunks()):
-            blocks[begin : begin + edges.shape[1]] = readout(edges, *f)
+            part = _readout_chunk(head, x, basis, n, edges, *f)
+            blocks[begin : begin + edges.shape[1]] = part
+            if row_sum is not None:
+                part64 = part.double()
+                row_sum.index_add_(0, edges[0], part64)
+                row_sum.index_add_(0, edges[1], part64.transpose(-1, -2))
+        if row_sum is not None:
+            # Diagonal assembly uses N + N.T, so N = -0.5 * row_sum yields H_ii = -row_sum.
+            node_blocks = (-0.5 * row_sum).to(dtype=node_blocks.dtype)
         return edge_index, blocks, node_blocks
 
     hessian = node_blocks.new_zeros((3 * n) * (3 * n))
     width = 3 * n
     c = torch.arange(3, device=x.device)
     ci, cj = c.view(1, 3, 1), c.view(1, 1, 3)
+    row_sum = (
+        torch.zeros((n, 3, 3), device=x.device, dtype=torch.float64) if asr else None
+    )
     for edges, *f in chunks():
-        blocks = readout(edges, *f)
+        blocks = _readout_chunk(head, x, basis, n, edges, *f)
         s = edges[0].view(-1, 1, 1)
         t = edges[1].view(-1, 1, 1)
         hessian.index_add_(
@@ -260,8 +320,104 @@ def predict(
             ((t * 3 + ci) * width + s * 3 + cj).reshape(-1),
             blocks.transpose(-1, -2).reshape(-1),
         )
+        if row_sum is not None:
+            b64 = blocks.double()
+            row_sum.index_add_(0, edges[0], b64)
+            row_sum.index_add_(0, edges[1], b64.transpose(-1, -2))
         del blocks, f
     hessian = hessian.view(n, 3, n, 3)
     ids = torch.arange(n, device=x.device)
-    hessian[ids, :, ids, :] += node_blocks + node_blocks.transpose(-1, -2)
+    if row_sum is not None:
+        hessian[ids, :, ids, :] += (-row_sum).to(dtype=hessian.dtype)
+    else:
+        hessian[ids, :, ids, :] += node_blocks + node_blocks.transpose(-1, -2)
     return hessian.view(width, width)
+
+
+@torch.no_grad()
+def predict_hvp(
+    head,
+    data,
+    emb,
+    direction,
+    *,
+    chunk_edges=65536,
+    cutoff=9.0,
+    msg_cutoff=None,
+    asr=True,
+    charge_clamp=4.0,
+    edge_index=None,
+    msg_edge_index=None,
+):
+    """
+    Streamed Hessian-vector product H @ direction in O(N + chunk_edges) memory.
+
+    Defaults to the large-system inference settings (``cutoff=9.0`` A,
+    ``asr=True``, ``charge_clamp=4.0``) that keep message-passing degrees
+    in-distribution and eliminate coherent acoustic sum-rule drift without
+    materializing (3N, 3N) or (E, 3, 3) tensors.
+
+    Args:
+        head: A ``Hessian_Head`` in eval mode (no MoLE routing).
+        data: AtomicData with one structure.
+        emb: Backbone output dictionary containing ``node_embedding``.
+        direction: Array or tensor of shape ``(n, 3)`` or ``(3 * n,)``.
+        chunk_edges: Directed edges per chunk.
+        cutoff: Pair cutoff in Angstrom (default 9.0), or None for all pairs.
+        msg_cutoff: Optional separate message-passing cutoff; defaults to ``cutoff``.
+        asr: If True (default), enforce exact blockwise ASR via
+            ``(H_asr v)_i = sum_{j!=i} H_sym_ij (v_j - v_i)``.
+        charge_clamp: Optional symmetric clamp on ``data.charge`` passed to
+            ``head.hip_charge_spin`` (default 4.0). Pass None to disable.
+        edge_index: Optional precomputed (2, E) readout graph.
+        msg_edge_index: Optional precomputed (2, E_msg) message-passing graph.
+
+    Returns:
+        FP64 tensor of shape ``(n, 3)`` on ``data.pos.device``.
+    """
+    _check(head, data)
+    if chunk_edges < 1:
+        raise ValueError("chunk_edges must be positive")
+    n = data.pos.shape[0]
+    v = torch.as_tensor(direction, device=data.pos.device, dtype=torch.float64).reshape(n, 3)
+
+    if edge_index is None:
+        edge_index = pair_list(data.pos, cutoff)
+    total = edge_index.shape[1]
+    gamma = roll_angles(head, total, data.pos.device)
+
+    if msg_edge_index is not None:
+        msg_edges = msg_edge_index
+        gamma_msg = roll_angles(head, msg_edges.shape[1], data.pos.device)
+    elif msg_cutoff is not None and msg_cutoff != cutoff:
+        msg_edges = pair_list(data.pos, msg_cutoff)
+        gamma_msg = roll_angles(head, msg_edges.shape[1], data.pos.device)
+    else:
+        msg_edges = edge_index
+        gamma_msg = gamma
+
+    x, node_blocks, basis = _run_message_blocks(
+        head, data, emb, msg_edges, gamma_msg, chunk_edges, charge_clamp=charge_clamp
+    )
+
+    if asr:
+        hv = torch.zeros((n, 3), device=data.pos.device, dtype=torch.float64)
+    else:
+        d64 = node_blocks.double()
+        hv = ((d64 + d64.transpose(1, 2)) @ v[..., None]).squeeze(-1)
+
+    for begin in range(0, total, chunk_edges):
+        edges = edge_index[:, begin : begin + chunk_edges]
+        roll = None if gamma is None else gamma[begin : begin + chunk_edges]
+        x_edge, wigner, wigner_inv = edge_features(head, data, edges, roll)
+        blocks = _readout_chunk(head, x, basis, n, edges, x_edge, wigner, wigner_inv).double()
+        s, t = edges[0], edges[1]
+        if asr:
+            dv_st = (v[t] - v[s])[..., None]
+            hv.index_add_(0, s, (blocks @ dv_st).squeeze(-1))
+            hv.index_add_(0, t, (blocks.transpose(1, 2) @ (-dv_st)).squeeze(-1))
+        else:
+            hv.index_add_(0, s, (blocks @ v[t, :, None]).squeeze(-1))
+            hv.index_add_(0, t, (blocks.transpose(1, 2) @ v[s, :, None]).squeeze(-1))
+        del x_edge, wigner, wigner_inv, blocks
+    return hv

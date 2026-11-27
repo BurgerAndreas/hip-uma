@@ -150,11 +150,17 @@ def generate_graph(
             - 'neighbors' (torch.Tensor): Number of neighbors for each atom.
     """
     if radius_pbc_version == 4 and not enforce_max_neighbors_strictly:
-        from fairchem.core.frozen_hip.radius import nonperiodic_graph
+        sizes = getattr(data, "hip_sizes", None)
+        if sizes and max(sizes) > 1024:
+            # Fused Triton radius graph supports up to 1024 atoms per molecule;
+            # fall back seamlessly to radius_graph_pbc_v2 for large macromolecules.
+            radius_pbc_version = 2
+        else:
+            from fairchem.core.frozen_hip.radius import nonperiodic_graph
 
-        if node_partition is not None:
-            raise ValueError("Fused molecular graphs do not support graph partitioning")
-        return nonperiodic_graph(data, cutoff, max_neighbors, pbc)
+            if node_partition is not None:
+                raise ValueError("Fused molecular graphs do not support graph partitioning")
+            return nonperiodic_graph(data, cutoff, max_neighbors, pbc)
     if radius_pbc_version in (1, 4):
         radius_graph_pbc_fn = radius_graph_pbc
     elif radius_pbc_version == 2:
