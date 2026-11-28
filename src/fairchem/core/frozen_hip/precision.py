@@ -28,13 +28,15 @@ class MixedPrecisionMLP(nn.Sequential):
         return output.float()
 
 
-def configure_head_precision(head, mode):
+def configure_head_precision(head, mode, radial_fp32_layers=0):
     """
     Preserve state names while selecting BF16 MLPs or FP16 edge hidden layers.
 
     BF16 MLP mode uses autocast only for scalar networks. FP16 edge mode uses
     explicit kernels and retains FP32 normalization and final projection.
     Parameters, parameter gradients, and optimizer states remain FP32.
+    radial_fp32_layers keeps the first Linear layers of each radial MLP in
+    FP32 in FP16 edge mode.
     """
     if mode not in ("fp32", "bf16", "bf16-mlp", "fp16-edge"):
         raise ValueError(f"Unknown HIP precision mode: {mode}")
@@ -55,5 +57,9 @@ def configure_head_precision(head, mode):
     if mode == "fp16-edge" or getattr(head, "edge_mixed_precision", False):
         from fairchem.core.frozen_hip.edge_precision import enable_edge_precision
 
-        enable_edge_precision(head, enabled=mode == "fp16-edge")
+        enable_edge_precision(
+            head,
+            enabled=mode == "fp16-edge",
+            radial_fp32_layers=radial_fp32_layers,
+        )
     return count

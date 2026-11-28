@@ -602,8 +602,13 @@ def norm_forward(self, x):
     ).to(x.dtype)
 
 
-def enable_edge_precision(head, enabled=True):
-    """Use FP16 only for edge hidden layers; retain FP32 parameters and outputs."""
+def enable_edge_precision(head, enabled=True, radial_fp32_layers=0):
+    """Use FP16 only for edge hidden layers; retain FP32 parameters and outputs.
+
+    radial_fp32_layers keeps the first Linear layers of each radial MLP in FP32.
+    The first layer reads the Gaussian distance basis, and FP16 there changes
+    the predicted Hessian.
+    """
     if enabled:
         if not getattr(head, "fully_connected_hessian", False):
             raise ValueError("FP16 edge kernels require complete HIP graphs")
@@ -634,6 +639,13 @@ def enable_edge_precision(head, enabled=True):
                 module.hip_fp32_output = enabled
         block.so2_conv_1.edge_mixed_precision = enabled
         block.so2_conv_2.edge_mixed_precision = enabled
+        for convolution in (block.so2_conv_1, block.so2_conv_2):
+            radial = getattr(convolution, "rad_func", None)
+            if not enabled or radial is None:
+                continue
+            linears = [m for m in radial.modules() if isinstance(m, torch.nn.Linear)]
+            for module in linears[:radial_fp32_layers]:
+                module.forward = module._hip_original_edge_forward
     for module in head.modules():
         if hasattr(module, "backend"):
             if enabled:
@@ -644,3 +656,4 @@ def enable_edge_precision(head, enabled=True):
                 module.backend = module._hip_original_edge_backend
     head.edge_mixed_precision = enabled
     head.edge_range_scaling = enabled
+    head.radial_fp32_layers = radial_fp32_layers if enabled else 0

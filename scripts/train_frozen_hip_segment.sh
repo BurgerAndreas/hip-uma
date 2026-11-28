@@ -154,6 +154,8 @@ if [[ "${ALLOW_FP16_CACHE:-0}" == 1 ]]; then args+=(--allow-fp16-cache); fi
 if [[ "${PACK_FEATURES_FP16:-0}" == 1 ]]; then args+=(--pack-features-fp16); fi
 if [[ -n "${PYTHON_SWITCH_INTERVAL:-}" ]]; then args+=(--python-switch-interval "$PYTHON_SWITCH_INTERVAL"); fi
 if [[ "${SPLIT_RADIAL:-0}" == 1 ]]; then args+=(--split-radial); fi
+# FP32 layers of each radial MLP with HEAD_PRECISION=fp16-edge (trainer default 2; 0 resumes runs made before 2026-11-28).
+if [[ -n "${RADIAL_FP32_LAYERS:-}" ]]; then args+=(--radial-fp32-layers "$RADIAL_FP32_LAYERS"); fi
 if [[ "${FUSED_RANGE_PACK:-0}" == 1 ]]; then args+=(--fused-range-pack); fi
 if [[ -n "${COMPILER_CACHE_ROOT:-}" ]]; then args+=(--compiler-cache "$COMPILER_CACHE_ROOT"); fi
 if [[ -n "${COMPILE_MODE:-}" ]]; then args+=(--compile-mode "$COMPILE_MODE"); fi

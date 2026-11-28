@@ -844,6 +844,11 @@ and `LOSS_SCALE=1024` through the allocation runner. Enable
 `DYNAMIC_LOSS_SCALE=1` for the qualified FP16 configuration. The default head
 precision remains FP32.
 
+`--radial-fp32-layers` (default 2) keeps the first `Linear` layers of each
+radial MLP in FP32. With 0, the mode of runs before 2026-11-28, the forward
+differs from FP32 by eigenvalue MAE 0.011 and a fine-tune moves the eigenvalue
+MAE up. See `frozen_hip_precision.md`.
+
 Radial gathering writes FP16 directly. Both SO2 convolutions keep FP32 outputs.
 Their matrix products use FP16 operands with power-of-two scaling in forward
 and backward. This protects learned message amplitudes and backward operands

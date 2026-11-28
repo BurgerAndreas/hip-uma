@@ -38,7 +38,6 @@ from fairchem.core.frozen_hip.packed import (
 )
 from fairchem.core.frozen_hip.precision import configure_head_precision
 from fairchem.core.frozen_hip.rotations import enable_fused_rotations
-from fairchem.core.frozen_hip.tf32 import SCOPES, TF32Scope
 from fairchem.core.frozen_hip.sequence import (
     PackedSequence,
     PlannedPackedDataset,
@@ -51,6 +50,7 @@ from fairchem.core.frozen_hip.sequence import (
     seed_rng,
     seed_update,
 )
+from fairchem.core.frozen_hip.tf32 import SCOPES, TF32Scope
 from fairchem.core.frozen_hip.validation import (
     EvaluationStream,
     append_evaluation,
@@ -189,6 +189,18 @@ def parse_args():
             "whole step. TF32 in the radial MLPs and in the projected readout "
             "changes the predicted Hessian, so a head trained with full needs "
             "TF32 at inference."
+        ),
+    )
+    p.add_argument(
+        "--radial-fp32-layers",
+        type=int,
+        choices=(0, 1, 2, 3),
+        default=2,
+        help=(
+            "With --head-precision fp16-edge: first Linear layers of each "
+            "radial MLP kept in FP32. FP16 in the first layer, which reads the "
+            "Gaussian distance basis, changes the predicted Hessian. 0 is the "
+            "mode of all runs before 2026-11-28."
         ),
     )
     p.add_argument("--compile-head", action="store_true")
@@ -338,6 +350,7 @@ def main():
             ("backbone_graph_version", 2),
             ("tf32", False),
             ("tf32_scope", "full"),
+            ("radial_fp32_layers", 0),
             ("grouped_mole", False),
             ("block_so2", False),
             ("projected_readout", False),
@@ -485,7 +498,9 @@ def main():
         enable_fused_radial(model.head)
     head = model.head
     tf32_scope = TF32Scope(head, args.tf32_scope)
-    configure_head_precision(head, args.head_precision)
+    configure_head_precision(
+        head, args.head_precision, radial_fp32_layers=args.radial_fp32_layers
+    )
     from fairchem.core.frozen_hip.edge_precision import enable_fused_range_pack
 
     enable_fused_range_pack(head, enabled=args.fused_range_pack)
@@ -566,6 +581,15 @@ def main():
         if state.get("translation_projection", False) != args.translation_projection:
             raise ValueError("Resume requires the same translation projection")
         if (
+            args.head_precision == "fp16-edge"
+            and state.get("head_precision", "fp32") == "fp16-edge"
+            and state.get("radial_fp32_layers", 0) != args.radial_fp32_layers
+        ):
+            raise ValueError(
+                "Resume requires the same radial precision: the checkpoint used "
+                f"--radial-fp32-layers {state.get('radial_fp32_layers', 0)}"
+            )
+        if (
             args.tf32
             and state.get("tf32", False)
             and state.get("tf32_scope", "full") != args.tf32_scope
@@ -586,7 +610,10 @@ def main():
             raise ValueError("Resume requires the same HIP expert count")
         if state.get("head_charge_spin", False) != args.head_charge_spin:
             raise ValueError("Resume requires the same charge/spin conditioning")
-        if state.get("head_charge_spin_mode", "extensive") != args.head_charge_spin_mode:
+        if (
+            state.get("head_charge_spin_mode", "extensive")
+            != args.head_charge_spin_mode
+        ):
             raise ValueError("Resume requires the same charge/spin conditioning mode")
         if state.get("head_message_cutoff") != args.head_message_cutoff:
             raise ValueError("Resume requires the same head message cutoff")
@@ -1053,6 +1080,7 @@ def main():
             "skipped_updates": skipped_updates,
             "tf32": args.tf32,
             "tf32_scope": args.tf32_scope,
+            "radial_fp32_layers": args.radial_fp32_layers,
             "backbone_precision": args.backbone_precision,
             "backbone_graph_version": args.backbone_graph_version,
             "fused_backbone": args.fused_backbone,
@@ -1185,7 +1213,9 @@ def main():
                     projected += batch_totals
                     structure_rows.extend(
                         [int(sid), int(n), *row]
-                        for sid, n, row in zip(host_data.sid, data.hip_sizes, batch_rows, strict=True)
+                        for sid, n, row in zip(
+                            host_data.sid, data.hip_sizes, batch_rows, strict=True
+                        )
                     )
                 else:
                     projected += metric_result
@@ -1221,7 +1251,19 @@ def main():
             destination = args.output / f"per_structure_rank{rank:04d}.csv"
             with temporary.open("w", newline="") as handle:
                 writer = csv.writer(handle)
-                writer.writerow(("sample_id", "natoms", "mass_weighted_eckart_abs_cos_v1", "mass_weighted_eckart_eigenvalue_mae", "mass_weighted_eckart_hessian_mae", "mass_weighted_eckart_hessian_rmse", "low3_overlap", "prediction_negative_count", "target_negative_count"))
+                writer.writerow(
+                    (
+                        "sample_id",
+                        "natoms",
+                        "mass_weighted_eckart_abs_cos_v1",
+                        "mass_weighted_eckart_eigenvalue_mae",
+                        "mass_weighted_eckart_hessian_mae",
+                        "mass_weighted_eckart_hessian_rmse",
+                        "low3_overlap",
+                        "prediction_negative_count",
+                        "target_negative_count",
+                    )
+                )
                 writer.writerows(structure_rows)
             temporary.replace(destination)
             if world > 1:
@@ -1700,7 +1742,11 @@ def main():
 
         configure_radial_tile(state.get("radial_tile", 64))
         enable_fused_radial(head, enabled=state.get("fused_radial", False))
-        configure_head_precision(head, args.head_precision)
+        configure_head_precision(
+            head,
+            args.head_precision,
+            radial_fp32_layers=state.get("radial_fp32_layers", 0),
+        )
         enable_fused_range_pack(head, enabled=state.get("fused_range_pack", False))
         enable_split_radial(head, enabled=state.get("split_radial", False))
         from fairchem.core.frozen_hip.edge_precision import enable_skinny_readout

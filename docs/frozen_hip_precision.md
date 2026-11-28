@@ -261,3 +261,35 @@ A forward comparison with the same weights and backbone features on 200 `validat
 The reduced-precision forward differs from the FP32 forward by eigenvalue MAE 0.010, with or without TF32.
 FP32 inference is not worse against the autograd reference than the training configuration.
 
+
+## Radial MLP precision in the FP16 edge mode
+
+The difference between the `fp16-edge` forward and the FP32 forward comes from the radial MLPs (`rad_func`) of the head blocks.
+`--radial-fp32-layers k` keeps the first `k` `Linear` layers of each radial MLP in FP32. The default is 2.
+Runs before 2026-11-28 used 0; a resume of such a run needs `--radial-fp32-layers 0` (`RADIAL_FP32_LAYERS=0` in the segment launcher).
+
+Forward and gradient against the FP32 head, `step4000000`, 160 `validation_200k` structures, A100 80 GB:
+
+| Head | Eigenvalue MAE vs FP32 head | Gradient error | Gradient cosine | Forward + backward per batch |
+| --- | ---: | ---: | ---: | ---: |
+| FP32 | 0 | 0 | 1 | 0.292 s + 0.526 s |
+| FP32, TF32 in backward | | | | 0.292 s + 0.206 s |
+| `fp16-edge`, k = 0 | 0.0112 | 124% | -0.72 | 0.097 s + 0.104 s |
+| `fp16-edge`, k = 1 | 0.00066 | 6% | 0.9995 | 0.097 s + 0.099 s |
+| `fp16-edge`, k = 2 | 0.00039 | 9% | 0.9993 | 0.099 s + 0.101 s |
+| `fp16-edge`, k = 3 | 0.00028 | 4% | 0.9998 | 0.118 s + 0.147 s |
+
+Matched fine-tunes of `step4000000` on `validation_200k` teacher Hessians (block loss, 20,000-step cosine schedule, seed 7, same data order, 500 dev structures, EMA weights, FP32 dev evaluation, step 10,000).
+Metrics use mass-weighted, Eckart-projected Hessians.
+
+| Head in training steps | Eigenvalue MAE | Lowest-mode cosine | Hessian MAE | s/step |
+| --- | ---: | ---: | ---: | ---: |
+| Start checkpoint | 0.0160 | 0.872 | 0.00122 | |
+| FP32, no TF32 | 0.0118 | 0.881 | 0.00118 | 1.19 |
+| FP32 head, `--tf32-scope scoped` | 0.0117 | 0.881 | 0.00118 | 0.61 |
+| `fp16-edge`, k = 2, `--tf32-scope head-fp32` | 0.0117 | 0.880 | 0.00118 | 0.30 |
+| `fp16-edge`, k = 3, `--tf32-scope head-fp32` | 0.0117 | 0.880 | 0.00118 | 0.34 |
+| `fp16-edge`, k = 0, `--tf32-scope head-fp32` | 0.0181 | 0.870 | 0.00122 | 0.30 |
+
+These fine-tunes ran with the evaluation trainer (`hipeval/finetune_sub.py`), which applies the same `enable_edge_precision` code.
+`train.py` did not run end to end with `--radial-fp32-layers`.

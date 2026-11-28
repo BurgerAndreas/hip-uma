@@ -285,3 +285,7 @@ This includes:
   GEMM inputs in FP16 and retain FP32 accumulators through rotation.
   Reject nonfinite features before cache publication and isolate cache namespaces
   when the expert output precision is updated.
+- `fp16-edge` with FP16 radial MLPs (`--radial-fp32-layers 0`) changes the
+  predicted Hessian (eigenvalue MAE 0.011 against FP32) and gives a gradient
+  with cosine -0.72 to the FP32 gradient. Keep at least the first radial
+  `Linear` layer in FP32; the default is 2.
