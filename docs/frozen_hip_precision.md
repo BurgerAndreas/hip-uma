@@ -245,3 +245,19 @@ Evaluation uses the strict FP32 head forward for `head-fp32` and `scoped`.
 A head trained with `full` needs TF32 at inference to reproduce its training-time output.
 The probe ran the head with FP32 head precision. It did not run `train.py` end to end, and it did not cover `--head-precision fp16-edge`.
 `tools/benchmark_hip_precision.py` compares the scopes on trainer-format shards, with `--compile-head` for the compiled head.
+
+## Training configuration against FP32 inference
+
+The `step4000000` checkpoint records `head_precision: fp16-edge`, `tf32: True`, and fused kernels.
+A forward comparison with the same weights and backbone features on 200 `validation_200k` structures (2 to 328 atoms) gives:
+
+| Head forward | Eigenvalue MAE vs FP32 head | Eigenvalue MAE vs autograd | Lowest-mode cosine vs autograd |
+| --- | ---: | ---: | ---: |
+| FP32 head, no TF32 | 0.00012 | 0.0157 | 0.881 |
+| FP32 head with TF32 | 0.00934 | 0.0164 | 0.878 |
+| `fp16-edge` training configuration with TF32 | 0.01013 | 0.0161 | 0.880 |
+| `fp16-edge` training configuration without TF32 | 0.01009 | 0.0160 | 0.877 |
+
+The reduced-precision forward differs from the FP32 forward by eigenvalue MAE 0.010, with or without TF32.
+FP32 inference is not worse against the autograd reference than the training configuration.
+
