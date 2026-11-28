@@ -38,6 +38,7 @@ from fairchem.core.frozen_hip.packed import (
 )
 from fairchem.core.frozen_hip.precision import configure_head_precision
 from fairchem.core.frozen_hip.rotations import enable_fused_rotations
+from fairchem.core.frozen_hip.tf32 import SCOPES, TF32Scope
 from fairchem.core.frozen_hip.sequence import (
     PackedSequence,
     PlannedPackedDataset,
@@ -175,6 +176,21 @@ def parse_args():
     p.add_argument("--backbone-precision", choices=("fp32", "fp16"), default="fp32")
     p.add_argument("--backbone-graph-version", type=int, choices=(1, 2, 4), default=2)
     p.add_argument("--tf32", action="store_true")
+    p.add_argument(
+        "--tf32-scope",
+        choices=SCOPES,
+        default="head-fp32",
+        help=(
+            "Region of --tf32. head-fp32 keeps the forward pass of the HIP head "
+            "in strict FP32 and permits TF32 in the frozen backbone and in the "
+            "backward pass. scoped also permits TF32 inside the head modules, "
+            "but not in the radial MLPs and not in the code of the head forward "
+            "itself; it needs an uncompiled head. full permits TF32 in the "
+            "whole step. TF32 in the radial MLPs and in the projected readout "
+            "changes the predicted Hessian, so a head trained with full needs "
+            "TF32 at inference."
+        ),
+    )
     p.add_argument("--compile-head", action="store_true")
     p.add_argument("--scaled-linear", action="store_true")
     p.add_argument("--fused-scatter", action="store_true")
@@ -197,6 +213,8 @@ def parse_args():
     args = p.parse_args()
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         p.error("--weight-decay must be finite and nonnegative")
+    if args.tf32 and args.tf32_scope == "scoped" and args.compile_head:
+        p.error("--tf32-scope scoped needs an uncompiled head; use head-fp32")
     if (
         not math.isfinite(args.packed_window_memory_gb)
         or args.packed_window_memory_gb < 0
@@ -319,6 +337,7 @@ def main():
             ("backbone_precision", "fp32"),
             ("backbone_graph_version", 2),
             ("tf32", False),
+            ("tf32_scope", "full"),
             ("grouped_mole", False),
             ("block_so2", False),
             ("projected_readout", False),
@@ -465,6 +484,7 @@ def main():
         configure_radial_tile(args.radial_tile)
         enable_fused_radial(model.head)
     head = model.head
+    tf32_scope = TF32Scope(head, args.tf32_scope)
     configure_head_precision(head, args.head_precision)
     from fairchem.core.frozen_hip.edge_precision import enable_fused_range_pack
 
@@ -545,6 +565,15 @@ def main():
             raise ValueError("Checkpoint final evaluation cohort differs")
         if state.get("translation_projection", False) != args.translation_projection:
             raise ValueError("Resume requires the same translation projection")
+        if (
+            args.tf32
+            and state.get("tf32", False)
+            and state.get("tf32_scope", "full") != args.tf32_scope
+        ):
+            raise ValueError(
+                "Resume requires the same TF32 scope: the checkpoint used "
+                f"--tf32-scope {state.get('tf32_scope', 'full')}"
+            )
         if state.get("head_width_multiplier", 1) != args.head_width_multiplier:
             raise ValueError("Resume requires the same head width")
         if state.get("dataset_revision") != args.dataset_revision:
@@ -867,8 +896,11 @@ def main():
         from torch.utils.checkpoint import checkpoint
 
         def forward(x):
+            # Activation checkpointing calls this again in the backward pass,
+            # so the scope is set here and not around the first call.
             with (
                 phase("hip_head"),
+                tf32_scope.forward(strict=not model.training),
                 torch.autocast(
                     "cuda", dtype=torch.bfloat16, enabled=args.head_precision == "bf16"
                 ),
@@ -1020,6 +1052,7 @@ def main():
             "grad_scaler": scaler.state_dict(),
             "skipped_updates": skipped_updates,
             "tf32": args.tf32,
+            "tf32_scope": args.tf32_scope,
             "backbone_precision": args.backbone_precision,
             "backbone_graph_version": args.backbone_graph_version,
             "fused_backbone": args.fused_backbone,

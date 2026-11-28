@@ -22,10 +22,14 @@ import torch
 from fairchem.core.frozen_hip.data import make_batch
 from fairchem.core.frozen_hip.model import FrozenHIP, parameter_hash, structure_mse
 from fairchem.core.frozen_hip.precision import configure_head_precision
+from fairchem.core.frozen_hip.tf32 import SCOPES, TF32Scope
 
 
-def loss_and_output(model, data, emb, mode):
-    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=mode == "bf16"):
+def loss_and_output(model, data, emb, mode, scope):
+    with (
+        scope.forward(),
+        torch.autocast("cuda", dtype=torch.bfloat16, enabled=mode == "bf16"),
+    ):
         out = model.head(data, emb)["hessian"]
     return structure_mse(out, data.hessian, data.hip_sizes), out.float()
 
@@ -38,6 +42,11 @@ def main():
     parser.add_argument("--steps", default=6, type=int)
     parser.add_argument("--pair-budget", default=196608, type=int)
     parser.add_argument("--sizes", nargs="+", default=[16, 72, 124, 350], type=int)
+    parser.add_argument(
+        "--compile-head",
+        action="store_true",
+        help="compile the message blocks and the edge readout as the trainer does",
+    )
     args = parser.parse_args()
     torch.set_num_threads(2)
     torch.manual_seed(7)
@@ -48,6 +57,24 @@ def main():
         assert state["backbone_sha256"] == frozen
         model.head.load_state_dict(state["head"])
     initial = copy.deepcopy(model.head.state_dict())
+    scopes = {
+        scope: TF32Scope(model.head, scope)
+        for scope in SCOPES
+        if not (args.compile_head and scope == "scoped")
+    }
+    if args.compile_head:
+        from fairchem.core.frozen_hip.compilation import bounded_compile
+
+        for block in model.head.blocks:
+            block.forward = bounded_compile(block.forward)
+        if getattr(model.head, "projected_readout", False):
+            model.head.projected_edge_irreps = bounded_compile(
+                model.head.projected_edge_irreps
+            )
+        else:
+            model.head.edge_readout.forward_messages = bounded_compile(
+                model.head.edge_readout.forward_messages
+            )
     markers = sorted(args.data.glob("shards/*/*.verified.json"))
     candidates = []
     for marker in markers[:: max(1, len(markers) // 256)] + markers[-1:]:
@@ -82,12 +109,17 @@ def main():
         with torch.no_grad():
             reference_emb = model.backbone(data)
         reference, reference_grad, reference_loss = None, None, None
-        for mode, tf32 in (
-            ("fp32", False),
-            ("fp32", True),
-            ("bf16-mlp", True),
-            ("bf16", True),
+        for mode, tf32, scope_name in (
+            ("fp32", False, "full"),
+            ("fp32", True, "full"),
+            ("fp32", True, "head-fp32"),
+            ("fp32", True, "scoped"),
+            ("bf16-mlp", True, "full"),
+            ("bf16", True, "full"),
         ):
+            if scope_name not in scopes:
+                continue
+            scope = scopes[scope_name]
             emb = reference_emb
             configure_head_precision(model.head, mode)
             model.head.load_state_dict(initial)
@@ -95,7 +127,7 @@ def main():
             optimizer = torch.optim.AdamW(model.head.parameters(), lr=1e-4, fused=True)
 
             optimizer.zero_grad(set_to_none=True)
-            loss, actual = loss_and_output(model, data, emb, mode)
+            loss, actual = loss_and_output(model, data, emb, mode, scope)
             loss.backward()
             grads = torch.cat(
                 [p.grad.detach().flatten() for p in model.head.parameters()]
@@ -109,6 +141,8 @@ def main():
                 batch=b,
                 precision=mode,
                 tf32=tf32,
+                tf32_scope=scope_name,
+                compiled=args.compile_head,
                 output_relative_error=(
                     (actual.detach() - reference).norm()
                     / reference.norm().clamp_min(1e-12)
@@ -135,7 +169,7 @@ def main():
                     if not cached:
                         with torch.no_grad():
                             emb = model.backbone(data)
-                    loss, out = loss_and_output(model, data, emb, mode)
+                    loss, out = loss_and_output(model, data, emb, mode, scope)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
                         model.head.parameters(), 10.0, error_if_nonfinite=True

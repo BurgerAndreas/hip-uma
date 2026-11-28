@@ -202,3 +202,46 @@ That isolated endpoint is not accuracy-qualified. The combined package passes th
 The short probes do not establish final training accuracy. Full validation remains necessary.
 
 See [the layout benchmark record](frozen_hip_layout_benchmark.json) for paired metrics and gradient checks.
+
+## TF32 scope
+
+TF32 in the forward pass of the head changes the predicted Hessian.
+A probe on the `step4000000` head (96 `validation_200k` structures, 2 to 35 atoms, A100) compared each setting with the strict FP32 output of the same weights.
+Metrics use mass weighting and Eckart projection, in eV/(amu A^2).
+
+| TF32 in | Eigenvalue MAE | Hessian MAE | Gradient relative error |
+| --- | ---: | ---: | ---: |
+| Nowhere (FP32 repeat) | 0.00018 | 0.000029 | 0.3% |
+| Whole step | 0.00998 | 0.000844 | 36% |
+| Frozen backbone only | 0.00020 | 0.000031 | 0.5% |
+| Backward pass only | 0.00019 | 0.000030 | 0.4% |
+| Radial MLPs (`rad_func`) only | 0.01010 | 0.000812 | 61% |
+| Code of the head forward outside its modules only | 0.00058 | 0.000133 | 12% |
+
+A fine-tune of this head for 20,000 steps with TF32 in the whole step and FP32 evaluation gave eigenvalue MAE 0.0187 on 500 held-out structures.
+The matched strict FP32 fine-tune gave 0.0115, and the start checkpoint 0.0160.
+
+`--tf32-scope` selects the region (`frozen_hip/tf32.py`). TF32 stays on in the frozen backbone and in the backward pass in each scope.
+
+| Scope | Head forward | Compiled head |
+| --- | --- | --- |
+| `head-fp32` (default) | Strict FP32 | Yes |
+| `scoped` | TF32 inside the head modules, strict FP32 in the radial MLPs and in the code of the head forward itself | No |
+| `full` | TF32, as all runs before 2026-11-28 | Yes |
+
+The same probe, with TF32 on in the process and the scope around the head forward:
+
+| Scope | Compiled | Eigenvalue MAE | Hessian MAE | Gradient relative error |
+| --- | --- | ---: | ---: | ---: |
+| `head-fp32` | No | 0.00019 | 0.000032 | 0.4% |
+| `scoped` | No | 0.00032 | 0.000047 | 1.7% |
+| `full` | No | 0.01014 | 0.000839 | 40% |
+| Strict FP32 | Yes | 0.00019 | 0.000030 | 0.4% |
+| `head-fp32` | Yes | 0.00018 | 0.000031 | 0.6% |
+| `full` | Yes | 0.01024 | 0.000826 | 39% |
+
+In the probe the backward pass carried 0.063 s of the 0.093 s per batch that TF32 saves, and `scoped` recovered 0.018 s of the forward part.
+Evaluation uses the strict FP32 head forward for `head-fp32` and `scoped`.
+A head trained with `full` needs TF32 at inference to reproduce its training-time output.
+The probe ran the head with FP32 head precision. It did not run `train.py` end to end, and it did not cover `--head-precision fp16-edge`.
+`tools/benchmark_hip_precision.py` compares the scopes on trainer-format shards, with `--compile-head` for the compiled head.

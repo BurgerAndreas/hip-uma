@@ -82,7 +82,7 @@ Hessian assembly, and losses retain FP32. Standard layer normalization uses
 FP32 under CUDA autocast. This mode preserves checkpoint parameter names.
 Use `--head-precision bf16` to test autocast across the complete head.
 The default backbone mode uses FP32 tensors. The recommended mode below uses
-FP16 only for frozen inference. The head keeps FP32 tensors. `--tf32` permits TensorFloat-32 matrix operations. Compare
+FP16 only for frozen inference. The head keeps FP32 tensors. `--tf32` permits TensorFloat-32 matrix operations. With the default `--tf32-scope head-fp32`, the forward pass of the HIP head stays in strict FP32 and TF32 applies to the frozen backbone and to the backward pass. `--tf32-scope full` permits TF32 in the whole step, as all runs before 2026-11-28 did. `--tf32-scope scoped` also permits TF32 inside the head modules but not in the radial MLPs; it needs a run without `--compile-head`. Resume a run with the scope of its checkpoint. Compare
 numerical errors and throughput with `tools/benchmark_frozen_hip.py` before
 selecting these options. Large graphs use activation checkpointing according
 to `--checkpoint-edges`.
