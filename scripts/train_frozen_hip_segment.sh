@@ -135,6 +135,7 @@ if [[ -n "${HEAD_MESSAGE_CUTOFF:-}" ]]; then args+=(--head-message-cutoff "$HEAD
 if [[ -n "${HEAD_READOUT_CUTOFF:-}" ]]; then args+=(--head-readout-cutoff "$HEAD_READOUT_CUTOFF"); fi
 if [[ -n "${HEAD_READOUT_RADIAL:-}" ]]; then args+=(--head-readout-radial "$HEAD_READOUT_RADIAL"); fi
 if [[ -n "${HEAD_READOUT_ENVELOPE_SCALE:-}" ]]; then args+=(--head-readout-envelope-scale "$HEAD_READOUT_ENVELOPE_SCALE"); fi
+if [[ "${HEAD_STRUCTURAL_ASR:-0}" == 1 ]]; then args+=(--head-structural-asr); fi
 if [[ -n "${HEAD_EXPERTS:-}" ]]; then args+=(--head-experts "$HEAD_EXPERTS"); fi
 if [[ -n "${LOSS_SCALE:-}" ]]; then args+=(--loss-scale "$LOSS_SCALE"); fi
 if [[ "${DYNAMIC_LOSS_SCALE:-0}" == 1 ]]; then args+=(--dynamic-loss-scale); fi
